@@ -34,6 +34,11 @@ class AgentConfig:
         self.max_steps: int = cfg.get("max_steps", 10)
         self.temperature: float = cfg.get("temperature", 0.7)
         self.max_tokens: int = cfg.get("max_tokens", 4096)
+        # 思考模式：none/null → 关闭，low/medium/high → 对应级别
+        _raw = cfg.get("reasoning_effort", None)
+        self.reasoning_effort: str | None = (
+            None if _raw is None or str(_raw).lower() == "none" else str(_raw)
+        )
         # 支持直接写文本或引用 .md 文件路径
         self.system_prompt: str = self._resolve_prompt(cfg, "system_prompt", base_dir)
         self.user_prompt: str = self._resolve_prompt(cfg, "user_prompt", base_dir)

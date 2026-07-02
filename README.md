@@ -73,7 +73,3 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
 }
 ```
-
-## 许可
-
-MIT

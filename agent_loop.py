@@ -132,6 +132,7 @@ class Agent:
         self.model = cfg.api.model
         self.temperature = cfg.agent.temperature
         self.max_tokens = cfg.agent.max_tokens
+        self.reasoning_effort = cfg.agent.reasoning_effort
 
         # 安全上限：防止死循环
         self.max_internal_steps = 50
@@ -161,7 +162,7 @@ class Agent:
             {"role": "system", "content": self.system_prompt},
             *self.messages,
         ]
-        response = self.client.chat.completions.create(
+        kwargs: dict[str, Any] = dict(
             model=self.model,
             messages=messages,
             tools=self.openai_tools,
@@ -169,6 +170,9 @@ class Agent:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
+        if self.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        response = self.client.chat.completions.create(**kwargs)
         return response, None
 
     # --------------------------------------------------------
@@ -190,6 +194,11 @@ class Agent:
 
             choice = response.choices[0]
             msg = choice.message
+
+            # 打印思考内容（部分模型通过 reasoning_effort 启用后返回）
+            reasoning = getattr(msg, "reasoning_content", None)
+            if reasoning:
+                print(f"  🤔 {reasoning}")
 
             # --- 工具调用 ---
             if msg.tool_calls:

@@ -23,7 +23,7 @@ def main() -> None:
     print("=" * 50)
     print("  mini-agent 交互模式")
     print("  输入 /exit 或 /quit 退出")
-    print("  输入 /reset 清空对话历史")
+    print("  输入 /new 清空对话历史")
     print("=" * 50)
 
     while True:
@@ -41,7 +41,7 @@ def main() -> None:
             print("再见！")
             break
 
-        if text == "/reset":
+        if text == "/reset" or text == "/new":
             agent.reset()
             print("对话历史已清空。")
             continue
