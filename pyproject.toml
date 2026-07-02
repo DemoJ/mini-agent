@@ -1,0 +1,9 @@
+[project]
+name = "mini-agent"
+version = "0.1.0"
+description = "一个最小的 Agent Loop 实现，使用 OpenAI SDK 调用兼容 API"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0",
+    "pyyaml>=6.0",
+]
