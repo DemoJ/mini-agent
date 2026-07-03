@@ -62,6 +62,7 @@ async function sendChat() {
         reasoningHasContent: false,
         replyRow: null,
         replyBubble: null,
+        replyRaw: '',
         replyHasContent: false,
     };
 
@@ -143,7 +144,8 @@ function handleStreamEvent(evt, ctx) {
             break;
         case 'reply_delta':
             ensureReplyBubble(ctx);
-            ctx.replyBubble.textContent += evt.content;
+            ctx.replyRaw += evt.content;
+            ctx.replyBubble.innerHTML = renderMarkdown(ctx.replyRaw);
             ctx.replyHasContent = true;
             scrollToBottom();
             break;
@@ -219,7 +221,7 @@ function ensureReplyBubble(ctx) {
         </div>
         <div class="msg-bubble-wrap">
             <div class="msg-name">mini-agent</div>
-            <div class="msg-bubble"></div>
+            <div class="msg-bubble markdown-body"></div>
         </div>`;
     messagesEl().appendChild(row);
     ctx.replyRow = row;
@@ -230,6 +232,8 @@ function ensureReplyBubble(ctx) {
 function finalizeReply(ctx) {
     if (!ctx.replyRow) return;
     ctx.replyRow.classList.remove('streaming');
+    // 定稿后对代码块统一高亮（流式过程未高亮）
+    if (ctx.replyBubble) highlightCode(ctx.replyBubble);
     ctx.replyRow = null;
     ctx.replyBubble = null;
 }
@@ -345,8 +349,9 @@ function appendAgentMessage(text) {
         </div>
          <div class="msg-bubble-wrap">
             <div class="msg-name">mini-agent</div>
-            <div class="msg-bubble">${escapeHtml(text)}</div>
+            <div class="msg-bubble markdown-body">${renderMarkdown(text)}</div>
          </div>`;
+    highlightCode(row.querySelector('.msg-bubble'));
     messagesEl().appendChild(row);
     scrollToBottom();
 }
@@ -539,6 +544,40 @@ function showToast(msg, type) {
     toast.className = 'toast ' + type;
     toast.hidden = false;
     setTimeout(() => { toast.hidden = true; }, 2500);
+}
+
+// ------------------------------------------------------------
+// Markdown 渲染
+// ------------------------------------------------------------
+// 配置 marked：GFM + 单换行转 <br>（更贴合聊天场景）
+if (typeof marked !== 'undefined') {
+    marked.setOptions({ gfm: true, breaks: true });
+}
+
+// 把 markdown 文本渲染为安全 HTML；CDN 失败时回退为纯文本
+function renderMarkdown(text) {
+    if (!text) return '';
+    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+        return escapeHtml(text).replace(/\n/g, '<br>');
+    }
+    let html;
+    try {
+        html = marked.parse(text);
+    } catch (_) {
+        return escapeHtml(text).replace(/\n/g, '<br>');
+    }
+    try {
+        html = DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
+    } catch (_) { /* 极端情况保留原始解析结果 */ }
+    return html;
+}
+
+// 对容器内所有代码块做高亮；流式中不调用，定稿后调用一次
+function highlightCode(container) {
+    if (!container || typeof hljs === 'undefined') return;
+    container.querySelectorAll('pre code').forEach((block) => {
+        try { hljs.highlightElement(block); } catch (_) { /* ignore */ }
+    });
 }
 
 // ------------------------------------------------------------

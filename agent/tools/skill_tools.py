@@ -43,9 +43,10 @@ def get_skill_tool_defs() -> dict[str, dict[str, Any]]:
         },
         "install_skill": {
             "description": (
-                "从 git 仓库安装一个新 skill。"
+                "从 git 仓库安装一个新 skill 到本项目 skills 目录。"
                 "用户想新增某个能力、提供了 skill 的 git 仓库地址时调用。"
-                "安装成功后该 skill 会立即出现在 skill 索引中，可用 load_skill 加载。"
+                "本工具会自动 clone 到项目 skills/ 目录，安装后立即可用 load_skill 加载。"
+                "切勿改用其他安装器或 bash 手动 clone 到其他目录，否则 skill 无法被加载。"
             ),
             "parameters": {
                 "type": "object",
