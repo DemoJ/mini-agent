@@ -17,7 +17,11 @@ ENV PYTHONUNBUFFERED=1 \
 #   - curl          : 健康检查 / 调试
 #   - ca-certificates: HTTPS 证书
 #   - tzdata        : 时区
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# 使用国内 Debian 镜像源（腾讯云）加速 apt 安装
+RUN sed -i 's@deb.debian.org@mirrors.tencent.com@g; s@security.debian.org@mirrors.tencent.com@g' /etc/apt/sources.list.d/debian.sources 2>/dev/null \
+    || sed -i 's@deb.debian.org@mirrors.tencent.com@g; s@security.debian.org@mirrors.tencent.com@g' /etc/apt/sources.list 2>/dev/null \
+    || true \
+    && apt-get update && apt-get install -y --no-install-recommends \
         bash \
         curl \
         ca-certificates \
@@ -28,7 +32,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 先安装 Python 依赖（与 pyproject.toml 中 dependencies 保持一致）
 # 单独一层，源码变更不会触发依赖重装，充分利用 Docker 缓存
+# 使用清华 PyPI 镜像源加速
 RUN pip install --no-cache-dir \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
         "openai>=1.0.0" \
         "pyyaml>=6.0" \
         "fastapi>=0.110.0" \
