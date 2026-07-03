@@ -1,0 +1,46 @@
+# ====================================================================
+# mini-agent .dockerignore
+# 排除不需要进入镜像的文件，减小镜像体积并避免泄露敏感信息
+# ====================================================================
+
+# Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 编辑器 / IDE / 系统文件
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# 配置文件（含 API Key 等敏感信息，运行时通过 volume 挂载注入，禁止打入镜像）
+config.yaml
+
+# Docker 自身文件（无需进入镜像）
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# 项目本地工作目录（AI 助手记忆/技能等，不应进镜像）
+.workbuddy/
+
+# 文档（可选，减小体积）
+README.md

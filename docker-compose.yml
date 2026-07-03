@@ -1,0 +1,47 @@
+# ====================================================================
+# mini-agent Docker Compose
+# --------------------------------------------------------------------
+# 使用步骤：
+#   1. 复制配置模板并填入真实配置：
+#        cp config.example.yaml config.yaml
+#        # 编辑 config.yaml 中的 base_url / api_key / model
+#
+#   2. 构建并后台启动：
+#        docker compose up -d --build
+#
+#   3. 浏览器访问：
+#        http://localhost:8000
+#
+#   4. 查看日志 / 停止：
+#        docker compose logs -f
+#        docker compose down
+#
+# 注意：
+#   - config.yaml 必须在启动前存在于项目根目录，否则 Docker 会把它
+#     当成目录挂载，导致容器启动失败。
+#   - 配置以读写方式挂载：在 WebUI「设置页」修改配置会写回宿主机的
+#     config.yaml。如需禁止写入，将下行 ":rw" 改为 ":ro"。
+# ====================================================================
+services:
+  mini-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mini-agent:latest
+    container_name: mini-agent
+    restart: unless-stopped
+    ports:
+      - "6666:8000"
+    volumes:
+      # 配置文件挂载（含 API Key，不打入镜像）
+      - ./config.yaml:/app/config.yaml:rw
+      # 如未来需要持久化数据，可取消注释：
+      # - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
