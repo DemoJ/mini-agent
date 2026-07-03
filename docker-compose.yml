@@ -10,7 +10,7 @@
 #        docker compose up -d --build
 #
 #   3. 浏览器访问：
-#        http://localhost:8000
+#        http://localhost:8080
 #
 #   4. 查看日志 / 停止：
 #        docker compose logs -f
@@ -21,6 +21,8 @@
 #     当成目录挂载，导致容器启动失败。
 #   - 配置以读写方式挂载：在 WebUI「设置页」修改配置会写回宿主机的
 #     config.yaml。如需禁止写入，将下行 ":rw" 改为 ":ro"。
+#   - 端口：宿主机端口不能选 6666/6667/6000/10080 等浏览器受限端口，
+#     否则浏览器会直接拒绝访问（curl 能通、浏览器打不开）。
 # ====================================================================
 services:
   mini-agent:
@@ -31,7 +33,7 @@ services:
     container_name: mini-agent
     restart: unless-stopped
     ports:
-      - "6666:8000"
+      - "8080:8000"
     volumes:
       # 配置文件挂载（含 API Key，不打入镜像）
       - ./config.yaml:/app/config.yaml:rw
