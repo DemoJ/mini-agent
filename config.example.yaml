@@ -20,3 +20,14 @@ agent:
   system_prompt: "prompt/system.md"    # 系统提示词（支持 .md 文件路径或直接文本）
   user_prompt: "prompt/user.md"        # 用户提示词模板，可用 {task} 占位
   skills_dir: "skills"   # skill 包目录（相对于配置文件）
+
+# ============================================================
+# 调试日志配置
+# ============================================================
+# 用于监测发送给 LLM 的实际内容是否符合预期
+debug:
+  log_llm_request: false   # 是否打印发送给 LLM 的请求内容（system prompt + messages + tools）
+  log_llm_response: false  # 是否打印 LLM 的响应内容
+  log_tools: true          # 是否在请求日志中包含 OpenAI tools 函数定义
+  log_to_file: false       # 是否同时写入日志文件
+  log_file: "logs/llm_debug.log"   # 日志文件路径（相对于配置文件）

@@ -20,8 +20,16 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent_loop import Agent
-from config_loader import get_config, load_config, save_config
+from agent.agent_loop import Agent
+from agent.config_loader import get_config, load_config, save_config
+from agent.skill_manager import (
+    SkillManageError,
+    delete_skill,
+    info_skill,
+    install_skill,
+    list_skills,
+    update_skill,
+)
 
 
 # ============================================================
@@ -77,6 +85,20 @@ class ChatRequest(BaseModel):
 class ConfigRequest(BaseModel):
     api: dict[str, Any]
     agent: dict[str, Any]
+
+
+class SkillInstallRequest(BaseModel):
+    url: str
+    name: str | None = None
+    force: bool = False
+
+
+class SkillUpdateRequest(BaseModel):
+    name: str
+
+
+class SkillDeleteRequest(BaseModel):
+    name: str
 
 
 # ------------------------------------------------------------
@@ -222,6 +244,99 @@ def api_save_config(req: ConfigRequest):
         raise HTTPException(status_code=500, detail=f"保存失败: {e}")
 
     return {"ok": True}
+
+
+# ============================================================
+# Skill 管理接口
+# ============================================================
+
+@app.get("/api/skills")
+def api_list_skills():
+    """列出所有已安装 skill。"""
+    try:
+        cfg = get_config()
+    except RuntimeError:
+        try:
+            cfg = load_config(CONFIG_PATH)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="config.yaml 不存在")
+    try:
+        return {"skills": list_skills()}
+    except SkillManageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/skills/{name}")
+def api_info_skill(name: str):
+    """查询单个 skill 详情。"""
+    try:
+        cfg = get_config()
+    except RuntimeError:
+        try:
+            cfg = load_config(CONFIG_PATH)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="config.yaml 不存在")
+    try:
+        return info_skill(name)
+    except SkillManageError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/api/skills/install")
+def api_install_skill(req: SkillInstallRequest):
+    """从 git 仓库安装 skill。"""
+    try:
+        cfg = get_config()
+    except RuntimeError:
+        try:
+            cfg = load_config(CONFIG_PATH)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="config.yaml 不存在")
+    try:
+        result = install_skill(req.url, name=req.name, force=req.force)
+        # 安装后重建 Agent，刷新 skill 索引
+        rebuild_agent()
+        return {"ok": True, **result}
+    except SkillManageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/skills/update")
+def api_update_skill(req: SkillUpdateRequest):
+    """更新已安装的 skill。"""
+    try:
+        cfg = get_config()
+    except RuntimeError:
+        try:
+            cfg = load_config(CONFIG_PATH)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="config.yaml 不存在")
+    try:
+        result = update_skill(req.name)
+        # 更新后重建 Agent，刷新 skill 索引（frontmatter 可能变化）
+        rebuild_agent()
+        return {"ok": True, **result}
+    except SkillManageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/skills/{name}")
+def api_delete_skill(name: str):
+    """删除已安装的 skill。"""
+    try:
+        cfg = get_config()
+    except RuntimeError:
+        try:
+            cfg = load_config(CONFIG_PATH)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="config.yaml 不存在")
+    try:
+        result = delete_skill(name)
+        # 删除后重建 Agent，刷新 skill 索引
+        rebuild_agent()
+        return {"ok": True, **result}
+    except SkillManageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ============================================================

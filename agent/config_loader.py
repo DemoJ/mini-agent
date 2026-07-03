@@ -84,6 +84,32 @@ class AgentConfig:
         }
 
 
+class DebugConfig:
+    """调试日志配置"""
+
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        # 是否打印发送给 LLM 的请求内容（system prompt + messages + tools）
+        self.log_llm_request: bool = cfg.get("log_llm_request", False)
+        # 是否打印 LLM 的响应内容
+        self.log_llm_response: bool = cfg.get("log_llm_response", False)
+        # 是否打印 OpenAI tools 函数定义
+        self.log_tools: bool = cfg.get("log_tools", True)
+        # 是否同时写入日志文件
+        self.log_to_file: bool = cfg.get("log_to_file", False)
+        # 日志文件路径（相对于配置文件父目录或绝对路径）
+        log_file_raw = cfg.get("log_file", "logs/llm_debug.log")
+        self.log_file: str = log_file_raw
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "log_llm_request": self.log_llm_request,
+            "log_llm_response": self.log_llm_response,
+            "log_tools": self.log_tools,
+            "log_to_file": self.log_to_file,
+            "log_file": self.log_file,
+        }
+
+
 class Config:
     """全局配置"""
 
@@ -93,12 +119,23 @@ class Config:
         base_dir = self.path.parent
         self.api = APIConfig(raw.get("api", {}))
         self.agent = AgentConfig(raw.get("agent", {}), base_dir)
+        self.debug = DebugConfig(raw.get("debug", {}))
+        self._base_dir = base_dir
 
     def to_dict(self, mask_key: bool = False) -> dict[str, Any]:
         return {
             "api": self.api.to_dict(mask_key=mask_key),
             "agent": self.agent.to_dict(),
+            "debug": self.debug.to_dict(),
         }
+
+    def resolve_log_file(self) -> Path:
+        """返回日志文件的绝对路径，自动创建父目录。"""
+        p = Path(self.debug.log_file)
+        if not p.is_absolute():
+            p = self._base_dir / p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
 
 
 # 模块级单例，方便各处引用
@@ -121,7 +158,7 @@ def save_config(data: dict[str, Any], path: str | Path = "config.yaml") -> Confi
     """
     把配置字典写回 yaml 文件，并重新加载模块级单例。
 
-    data 结构：{"api": {...}, "agent": {...}}
+    data 结构：{"api": {...}, "agent": {...}, "debug": {...}}
     reasoning_effort 为 "none" 时写为 null。
     """
     path = Path(path)
@@ -137,6 +174,7 @@ def save_config(data: dict[str, Any], path: str | Path = "config.yaml") -> Confi
     out = {
         "api": data.get("api", {}),
         "agent": agent_data,
+        "debug": data.get("debug", {}),
     }
 
     with open(path, "w", encoding="utf-8") as f:

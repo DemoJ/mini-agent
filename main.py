@@ -6,7 +6,7 @@ mini-agent 入口文件
 
 import sys
 
-from agent_loop import Agent
+from agent.agent_loop import Agent
 
 
 def main() -> None:

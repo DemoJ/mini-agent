@@ -13,7 +13,7 @@ ENV PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai
 
 # 安装基础系统依赖：
-#   - bash          : agent_loop.py 的 bash 工具需要
+#   - bash          : agent/tools/builtin.py 的 bash 工具需要
 #   - curl          : 健康检查 / 调试
 #   - ca-certificates: HTTPS 证书
 #   - tzdata        : 时区
@@ -42,7 +42,8 @@ RUN pip install --no-cache-dir \
 
 # 拷贝项目源码
 # 注意：config.yaml 由 .dockerignore 排除，不会进入镜像
-COPY main.py agent_loop.py config_loader.py webui.py ./
+COPY main.py webui.py ./
+COPY agent/  ./agent/
 COPY web/    ./web/
 COPY prompt/ ./prompt/
 COPY config.example.yaml ./

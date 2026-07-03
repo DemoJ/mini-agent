@@ -5,6 +5,11 @@
 
 内置工具：bash（执行 Shell 命令）、finish（完成任务）、load_skill（加载技能）
 
+工具注册拆分到 agent/tools/ 下：
+  - agent/tools/builtin.py    : bash / finish（无状态内置工具）
+  - agent/tools/skill_tools.py: load_skill / list / install / update / delete / info
+                                （schema 定义，执行逻辑在本模块的 _do_* 方法中）
+
 Skill 采用三层懒加载：
   L1 索引层 —— 启动时扫描 skills/，只读 frontmatter，注入 system prompt（常驻）
   L2 指令层 —— LLM 调 load_skill(name) 时读 SKILL.md 正文 + 注册该 skill 工具
@@ -12,83 +17,29 @@ Skill 采用三层懒加载：
 """
 
 import json
-import subprocess
+import sys
+from datetime import datetime
 from typing import Any
 
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
-from config_loader import get_config, load_config
-from skill_loader import (
+from agent.config_loader import Config, get_config, load_config
+from agent.skill_loader import (
     SkillInfo,
     discover_skills,
     load_skill_full,
     make_read_file_tool,
 )
-
-# ============================================================
-# 内置工具函数
-# ============================================================
-
-def tool_bash(command: str) -> dict:
-    """执行一条 shell 命令并返回结果"""
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        return {
-            "success": result.returncode == 0,
-            "exit_code": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        }
-    except subprocess.TimeoutExpired:
-        return {"success": False, "exit_code": -1, "stdout": "", "stderr": "命令执行超时"}
-    except Exception as e:
-        return {"success": False, "exit_code": -1, "stdout": "", "stderr": str(e)}
-
-
-def tool_finish(summary: str) -> dict:
-    """完成任务并给出最终总结（Agent 内部使用）"""
-    return {"summary": summary}
-
-
-def _builtin_tools() -> dict[str, dict[str, Any]]:
-    """返回内置工具的副本（每个 Agent 实例独立一份，可动态扩展）。"""
-    return {
-        "bash": {
-            "description": "执行一条 shell 命令，支持管道、重定向等标准 shell 语法",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "要执行的 shell 命令",
-                    }
-                },
-                "required": ["command"],
-            },
-            "fn": tool_bash,
-        },
-        "finish": {
-            "description": "完成任务，提供最终答案或总结。当你已经完成了用户的要求、可以给出最终回答时调用此工具。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "summary": {
-                        "type": "string",
-                        "description": "最终的答案或任务总结",
-                    }
-                },
-                "required": ["summary"],
-            },
-            "fn": tool_finish,
-        },
-    }
+from agent.skill_manager import (
+    SkillManageError,
+    delete_skill as _sm_delete_skill,
+    info_skill as _sm_info_skill,
+    install_skill as _sm_install_skill,
+    list_skills as _sm_list_skills,
+    update_skill as _sm_update_skill,
+)
+from agent.tools import get_builtin_tools, get_skill_tool_defs
 
 
 # ============================================================
@@ -115,6 +66,7 @@ class Agent:
     def __init__(self, config_path: str = "config.yaml") -> None:
         load_config(config_path)
         cfg = get_config()
+        self._cfg: Config = cfg
 
         self.client = OpenAI(
             base_url=cfg.api.base_url,
@@ -128,8 +80,14 @@ class Agent:
         # 安全上限：防止死循环
         self.max_internal_steps = 50
 
+        # ---- 调试日志配置 ----
+        self.debug = cfg.debug
+
         # ---- 实例级工具注册表（可动态扩展）----
-        self.tools: dict[str, dict[str, Any]] = _builtin_tools()
+        # 内置工具（bash / finish）+ skill 相关工具（load_skill / list / install / update / delete / info）
+        # schema 定义来自 agent/tools/，skill 相关工具的 fn=None，执行逻辑在本类的 _do_* 方法中
+        self.tools: dict[str, dict[str, Any]] = get_builtin_tools()
+        self.tools.update(get_skill_tool_defs())
 
         # ---- Skill 注册表 ----
         # L1 索引：所有已发现的 skill 元数据（常驻）
@@ -138,9 +96,6 @@ class Agent:
         )
         # 已完整加载（L2）的 skill 名集合，用于幂等去重
         self._loaded_skills: set[str] = set()
-
-        # 注册 load_skill 内置工具
-        self._register_load_skill_tool()
 
         # 刷新 OpenAI tools 参数
         self.openai_tools = self._build_openai_tools()
@@ -157,27 +112,10 @@ class Agent:
     # --------------------------------------------------------
     # 工具注册与刷新
     # --------------------------------------------------------
-
-    def _register_load_skill_tool(self) -> None:
-        """注册 load_skill 内置工具：让 LLM 能按需激活某 skill。"""
-        self.tools["load_skill"] = {
-            "description": (
-                "加载指定 skill 的完整指令与工具。"
-                "当用户请求匹配某 skill 的触发词或描述时调用此工具。"
-                "调用后会返回该 skill 的详细指令，并自动注册其工具。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "要加载的 skill 名称（见上方 skill 索引）",
-                    }
-                },
-                "required": ["name"],
-            },
-            "fn": None,  # 由 _execute_tool_call 特殊处理
-        }
+    # 内置工具与 skill 工具的 schema 定义已移至 agent/tools/：
+    #   - get_builtin_tools()      → bash / finish
+    #   - get_skill_tool_defs()    → load_skill / list / install / update / delete / info
+    # skill 工具的执行逻辑见下方 _do_* 方法，由 _execute_tool_call 统一分发。
 
     def _build_openai_tools(self) -> list[dict]:
         """把 self.tools 转成 OpenAI tool calling 格式。"""
@@ -263,6 +201,87 @@ class Agent:
         )
 
     # --------------------------------------------------------
+    # Skill 管理工具的内部实现（list/install/update/delete/info）
+    # --------------------------------------------------------
+
+    def _do_list_skills(self) -> str:
+        """列出所有已安装 skill。"""
+        try:
+            skills = _sm_list_skills()
+            return json.dumps(
+                {"ok": True, "count": len(skills), "skills": skills},
+                ensure_ascii=False,
+            )
+        except SkillManageError as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    def _do_install_skill(self, url: str, name: str | None = None, force: bool = False) -> str:
+        """安装 skill，成功后刷新 skill 索引与 system prompt。"""
+        try:
+            result = _sm_install_skill(url, name=name, force=force)
+        except SkillManageError as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+        # 刷新 skill 索引（新增 skill 要出现在 system prompt 里）
+        self._refresh_skills_after_change()
+        return json.dumps({"ok": True, **result}, ensure_ascii=False)
+
+    def _do_update_skill(self, name: str) -> str:
+        """更新 skill，成功后刷新 skill 索引（frontmatter 可能变化）。"""
+        try:
+            result = _sm_update_skill(name)
+        except SkillManageError as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+        self._refresh_skills_after_change()
+        return json.dumps({"ok": True, **result}, ensure_ascii=False)
+
+    def _do_delete_skill(self, name: str) -> str:
+        """删除 skill，成功后刷新 skill 索引与 system prompt。"""
+        try:
+            result = _sm_delete_skill(name)
+        except SkillManageError as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+        # 清理该 skill 已加载的工具（避免 LLM 调到不存在的工具）
+        self._unload_skill_tools(name)
+        self._refresh_skills_after_change()
+        return json.dumps({"ok": True, **result}, ensure_ascii=False)
+
+    def _do_info_skill(self, name: str) -> str:
+        """查询 skill 详情。"""
+        try:
+            detail = _sm_info_skill(name)
+            return json.dumps({"ok": True, **detail}, ensure_ascii=False)
+        except SkillManageError as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    def _unload_skill_tools(self, skill_name: str) -> None:
+        """从工具注册表移除某 skill 的所有工具（用于删除 skill 后清理）。"""
+        prefix = f"{skill_name}__"
+        to_remove = [n for n in self.tools if n.startswith(prefix)]
+        for n in to_remove:
+            self.tools.pop(n, None)
+        self._loaded_skills.discard(skill_name)
+
+    def _refresh_skills_after_change(self) -> None:
+        """skill 增删改后调用：重扫 skills 目录、刷新索引与 system prompt、刷新 tools。"""
+        cfg = self._cfg
+        self.skills_registry = discover_skills(cfg.agent.skills_dir)
+        # 删除已不存在的 skill 的已加载标记
+        self._loaded_skills = {
+            n for n in self._loaded_skills if n in self.skills_registry
+        }
+        # 重建 system prompt（skill 索引段落会变）
+        tools_desc = self._build_tools_description()
+        skills_index = self._build_skills_index()
+        self.system_prompt = cfg.agent.system_prompt.format(
+            tools_desc=tools_desc,
+            skills_index=skills_index,
+        )
+        self._refresh_openai_tools()
+
+    # --------------------------------------------------------
     # 工具描述 / skill 索引（注入 system prompt）
     # --------------------------------------------------------
 
@@ -291,9 +310,23 @@ class Agent:
 
     def _execute_tool_call(self, tool_name: str, args: dict) -> str:
         """执行工具调用并返回序列化的结果字符串。"""
-        # load_skill 特殊处理（需访问 self 状态）
+        # 需要访问 self 状态的工具特殊处理
         if tool_name == "load_skill":
             return self._do_load_skill(args.get("name", ""))
+        if tool_name == "list_skills":
+            return self._do_list_skills()
+        if tool_name == "install_skill":
+            return self._do_install_skill(
+                url=args.get("url", ""),
+                name=args.get("name"),
+                force=bool(args.get("force", False)),
+            )
+        if tool_name == "update_skill":
+            return self._do_update_skill(args.get("name", ""))
+        if tool_name == "delete_skill":
+            return self._do_delete_skill(args.get("name", ""))
+        if tool_name == "info_skill":
+            return self._do_info_skill(args.get("name", ""))
 
         if tool_name not in self.tools:
             return json.dumps(
@@ -320,12 +353,170 @@ class Agent:
     # LLM 调用
     # --------------------------------------------------------
 
+    def _format_messages_for_log(
+        self, messages: list[ChatCompletionMessageParam]
+    ) -> str:
+        """把 messages 列表格式化成可读文本（用于调试日志）。"""
+        lines: list[str] = []
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "?")
+            lines.append(f"  [{i}] role={role}")
+
+            content = msg.get("content")
+            if content:
+                # content 可能是 str 或 list（多模态），统一成字符串
+                if isinstance(content, list):
+                    content_str = json.dumps(content, ensure_ascii=False)
+                else:
+                    content_str = str(content)
+                lines.append(f"      content: {content_str}")
+
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                for tc in tool_calls:
+                    fn = tc.get("function", {}) if isinstance(tc, dict) else tc.function
+                    if isinstance(fn, dict):
+                        name = fn.get("name", "")
+                        args = fn.get("arguments", "")
+                    else:
+                        name = getattr(fn, "name", "")
+                        args = getattr(fn, "arguments", "")
+                    lines.append(f"      tool_call: {name}({args})")
+
+            tool_call_id = msg.get("tool_call_id")
+            if tool_call_id:
+                lines.append(f"      tool_call_id: {tool_call_id}")
+
+            lines.append("")
+        return "\n".join(lines)
+
+    def _format_tools_for_log(self, tools: list[dict]) -> str:
+        """把 OpenAI tools 参数格式化成可读文本。"""
+        if not tools:
+            return "  (无)"
+        lines: list[str] = []
+        for t in tools:
+            fn = t.get("function", {})
+            name = fn.get("name", "")
+            desc = fn.get("description", "")
+            params = fn.get("parameters", {})
+            required = params.get("required", [])
+            lines.append(f"  - {name}({', '.join(required)}): {desc}")
+        return "\n".join(lines)
+
+    def _log_llm_request(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        tools: list[dict],
+        tag: str = "LLM-REQUEST",
+    ) -> None:
+        """格式化打印发送给 LLM 的请求内容（system prompt + messages + tools）。
+
+        受 debug.log_llm_request 开关控制。可选写入文件（debug.log_to_file）。
+        输出到 stderr，避免与正常对话输出混淆。
+        """
+        if not self.debug.log_llm_request:
+            return
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        sep = "=" * 70
+
+        # system prompt 是 messages[0]
+        system_content = ""
+        rest_messages = messages
+        if messages and messages[0].get("role") == "system":
+            system_content = str(messages[0].get("content", ""))
+            rest_messages = messages[1:]
+
+        body = [
+            sep,
+            f"[{tag}] {now}  model={self.model}",
+            sep,
+            "",
+            "▼ System Prompt",
+            "-" * 70,
+            system_content or "(空)",
+            "",
+            f"▼ Messages (共 {len(rest_messages)} 条)",
+            "-" * 70,
+            self._format_messages_for_log(rest_messages),
+        ]
+
+        if self.debug.log_tools:
+            body.extend([
+                f"▼ Tools (共 {len(tools)} 个)",
+                "-" * 70,
+                self._format_tools_for_log(tools),
+                "",
+            ])
+
+        body.append(sep)
+        body.append("")
+        output = "\n".join(body)
+
+        # 输出到 stderr
+        print(output, file=sys.stderr, flush=True)
+
+        # 可选写入文件
+        if self.debug.log_to_file:
+            try:
+                log_path = self._cfg.resolve_log_file()
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(output)
+            except Exception as e:
+                print(f"[{tag}] 写入日志文件失败: {e}", file=sys.stderr)
+
+    def _log_llm_response(self, response: Any, tag: str = "LLM-RESPONSE") -> None:
+        """打印 LLM 的响应内容。受 debug.log_llm_response 开关控制。"""
+        if not self.debug.log_llm_response:
+            return
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        sep = "=" * 70
+        lines = [
+            sep,
+            f"[{tag}] {now}",
+            sep,
+        ]
+        try:
+            choice = response.choices[0]
+            msg = choice.message
+            reasoning = getattr(msg, "reasoning_content", None)
+            if reasoning:
+                lines.append(f"reasoning_content: {reasoning}")
+            lines.append(f"content: {msg.content or '(空)'}")
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    lines.append(
+                        f"tool_call: {tc.function.name}({tc.function.arguments})"
+                    )
+            finish = getattr(choice, "finish_reason", None)
+            if finish:
+                lines.append(f"finish_reason: {finish}")
+        except Exception as e:
+            lines.append(f"(解析响应失败: {e})")
+        lines.append(sep)
+        lines.append("")
+        output = "\n".join(lines)
+        print(output, file=sys.stderr, flush=True)
+
+        if self.debug.log_to_file:
+            try:
+                log_path = self._cfg.resolve_log_file()
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(output)
+            except Exception as e:
+                print(f"[{tag}] 写入日志文件失败: {e}", file=sys.stderr)
+
     def _call_llm(self) -> tuple[Any, str | None]:
         """调用 LLM，返回 (response, error)。"""
         messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": self.system_prompt},
             *self.messages,
         ]
+        # 调试日志：打印发送给 LLM 的完整请求
+        self._log_llm_request(messages, self.openai_tools)
+
         kwargs: dict[str, Any] = dict(
             model=self.model,
             messages=messages,
@@ -337,6 +528,10 @@ class Agent:
         if self.reasoning_effort is not None:
             kwargs["reasoning_effort"] = self.reasoning_effort
         response = self.client.chat.completions.create(**kwargs)
+
+        # 调试日志：打印 LLM 响应
+        self._log_llm_response(response)
+
         return response, None
 
     def _call_llm_stream(self):
@@ -345,6 +540,9 @@ class Agent:
             {"role": "system", "content": self.system_prompt},
             *self.messages,
         ]
+        # 调试日志：打印发送给 LLM 的完整请求
+        self._log_llm_request(messages, self.openai_tools, tag="LLM-REQUEST-STREAM")
+
         kwargs: dict[str, Any] = dict(
             model=self.model,
             messages=messages,

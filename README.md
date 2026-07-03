@@ -80,35 +80,111 @@ python webui.py --port 8080     # 自定义端口
 mini-agent/
 ├── main.py                 # REPL 入口
 ├── webui.py                # WebUI 入口（FastAPI）
-├── agent_loop.py           # Agent 自主循环 + 工具注册
-├── config_loader.py        # 配置加载/保存模块
 ├── config.yaml             # 本地配置（已 gitignore）
-├── config.yaml.example     # 示例配置
-├── pip.ini.example         # pip 镜像源示例配置
+├── config.example.yaml     # 示例配置
+├── pyproject.toml          # 项目元数据与打包配置
+├── agent/                  # 核心包
+│   ├── __init__.py         # 包入口，导出 Agent / Config 等
+│   ├── agent_loop.py       # Agent 自主循环 + 工具执行分发
+│   ├── config_loader.py    # 配置加载/保存模块
+│   ├── skill_loader.py     # Skill 三层懒加载（索引/指令/参考）
+│   ├── skill_manager.py    # Skill 管理（安装/更新/删除/列表/详情）
+│   └── tools/              # 工具注册
+│       ├── __init__.py     # 导出 get_builtin_tools / get_skill_tool_defs
+│       ├── builtin.py      # 内置工具：bash / finish
+│       └── skill_tools.py  # skill 工具 schema：load_skill / list / install / update / delete / info
+├── test/                   # 单元测试
+│   └── test_skill_manager.py
 ├── web/                    # WebUI 前端
 │   ├── index.html          # 单页前端
 │   ├── app.js              # 交互逻辑
 │   └── style.css           # 样式
-├── docs/
-│   └── webui-requirements.md  # WebUI 需求文档
 ├── prompt/
 │   ├── system.md           # 系统提示词
 │   └── user.md             # 用户提示词模板
-└── .gitignore
+└── skills/                 # 已安装 skill 目录（每个子目录是一个 skill）
 ```
 
 ## 扩展
 
-在 `agent_loop.py` 的 `TOOLS` 字典中注册新工具即可：
+### 注册新工具
+
+工具按类型分到 `agent/tools/` 下：
+
+- **无状态内置工具**（如 `bash`、`finish`）：加到 `agent/tools/builtin.py` 的 `get_builtin_tools()` 返回字典中。
+- **需要访问 Agent 状态的工具**：在 `agent/tools/skill_tools.py` 的 `get_skill_tool_defs()` 中定义 schema（`fn` 置 `None`），然后在 `agent/agent_loop.py` 的 `_execute_tool_call()` 中添加分发分支，调用对应的 `_do_*` 方法。
 
 ```python
-TOOLS: dict[str, dict[str, Any]] = {
-    "bash": { ... },
-    "finish": { ... },
-    "my_tool": {
-        "description": "工具描述",
-        "parameters": { "type": "object", "properties": { ... }, "required": [...] },
-        "fn": my_tool_func,
-    },
-}
+# agent/tools/builtin.py —— 无状态工具
+def my_tool_func(arg: str) -> dict:
+    ...
+
+def get_builtin_tools() -> dict:
+    return {
+        "bash": { ... },
+        "finish": { ... },
+        "my_tool": {
+            "description": "工具描述",
+            "parameters": { "type": "object", "properties": { ... }, "required": [...] },
+            "fn": my_tool_func,
+        },
+    }
+```
+
+### Skill 管理
+
+Skill 是可按需加载的能力包，每个 skill 是 `skills/` 下的一个子目录，至少含 `SKILL.md`（frontmatter + 指令正文），可选 `tools.py`（工具定义）和 `references/`（参考文档）。
+
+**命令行管理**（`agent/skill_manager.py`）：
+
+```bash
+# 列出已安装 skill
+python -m agent.skill_manager list
+
+# 从 git 仓库安装（name 可选，默认从 URL 推断）
+python -m agent.skill_manager install https://github.com/foo/my-skill
+python -m agent.skill_manager install https://github.com/foo/my-skill --name my-skill
+
+# 更新某个 skill（git fetch + reset）
+python -m agent.skill_manager update my-skill
+
+# 删除某个 skill
+python -m agent.skill_manager delete my-skill -y
+
+# 查看详情
+python -m agent.skill_manager info my-skill
+```
+
+**HTTP API**（`webui.py` 启动后可用）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/skills` | 列出所有已安装 skill |
+| GET | `/api/skills/{name}` | 查询单个 skill 详情 |
+| POST | `/api/skills/install` | 安装 skill，body: `{"url": "...", "name": "...", "force": false}` |
+| POST | `/api/skills/update` | 更新 skill，body: `{"name": "..."}` |
+| DELETE | `/api/skills/{name}` | 删除 skill |
+
+安装/更新/删除后会自动重建 Agent，刷新 skill 索引。
+
+**安全**：skill 名只允许字母、数字、下划线、短横线（1-64 字符），杜绝路径穿越；删除前二次确认目标在 `skills_dir` 内。
+
+**创建自己的 skill**：在 `skills/` 下新建目录，至少写一个 `SKILL.md`：
+
+```
+skills/my-skill/
+├── SKILL.md        # 必需：frontmatter + 指令正文
+├── tools.py        # 可选：暴露 get_tools() 返回工具字典
+└── references/     # 可选：参考文档，skill 内可通过 read_file 工具读取
+```
+
+`SKILL.md` frontmatter 格式：
+
+```yaml
+---
+name: my-skill
+description: 一句话描述这个 skill 能做什么
+triggers: [关键词1, 关键词2]
+---
+这里是给 LLM 看的完整指令正文……
 ```

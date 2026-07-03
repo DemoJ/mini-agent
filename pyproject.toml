@@ -11,5 +11,6 @@ dependencies = [
 ]
 
 [tool.setuptools]
-# 本项目为扁平结构（多个顶层 .py 文件），显式列出模块避免自动发现误打包 web/prompt 等目录
-py-modules = ["main", "agent_loop", "config_loader", "webui"]
+# agent/ 为核心包（含子包 agent/tools/）；main.py / webui.py 为顶层入口脚本
+packages = ["agent", "agent.tools"]
+py-modules = ["main", "webui"]
