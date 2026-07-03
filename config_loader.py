@@ -58,6 +58,10 @@ class AgentConfig:
         # 支持直接写文本或引用 .md 文件路径
         self.system_prompt: str = self._resolve_prompt(cfg, "system_prompt", base_dir)
         self.user_prompt: str = self._resolve_prompt(cfg, "user_prompt", base_dir)
+        # Skill 目录路径（相对于配置文件父目录或绝对路径）
+        skills_dir_raw = cfg.get("skills_dir", "skills")
+        skills_dir_path = (base_dir / skills_dir_raw) if not Path(skills_dir_raw).is_absolute() else Path(skills_dir_raw)
+        self.skills_dir: Path = skills_dir_path
 
     @staticmethod
     def _resolve_prompt(cfg: dict[str, Any], key: str, base_dir: Path) -> str:
@@ -76,6 +80,7 @@ class AgentConfig:
             "reasoning_effort": self.reasoning_effort or "none",
             "system_prompt": self.system_prompt,
             "user_prompt": self.user_prompt,
+            "skills_dir": str(self.skills_dir),
         }
 
 

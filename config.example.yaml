@@ -19,3 +19,4 @@ agent:
   reasoning_effort: ~    # 思考模式: "none"/null=关闭, "minimal"/"low"/"medium"/"high"/"xhigh"=对应深度
   system_prompt: "prompt/system.md"    # 系统提示词（支持 .md 文件路径或直接文本）
   user_prompt: "prompt/user.md"        # 用户提示词模板，可用 {task} 占位
+  skills_dir: "skills"   # skill 包目录（相对于配置文件）
