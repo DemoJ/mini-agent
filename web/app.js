@@ -439,6 +439,17 @@ function hideError() {
 // ------------------------------------------------------------
 // 设置表单
 // ------------------------------------------------------------
+// 提示词存储位置提示：文件引用模式 → 显示来源 md 文件路径；内联模式 → 提示将存入 config.yaml
+function setPromptHint(elId, file) {
+    const el = $(elId);
+    if (!el) return;
+    if (file) {
+        el.innerHTML = '存储于 <code>' + escapeHtml(file) + '</code>，保存时写回此文件';
+    } else {
+        el.textContent = '内联模式，保存时写入 config.yaml';
+    }
+}
+
 async function loadSettings() {
     try {
         const resp = await fetch('/api/config');
@@ -457,6 +468,9 @@ async function loadSettings() {
         $('cfg-reasoning-effort').value = cfg.agent?.reasoning_effort || 'none';
         $('cfg-system-prompt').value = cfg.agent?.system_prompt || '';
         $('cfg-user-prompt').value = cfg.agent?.user_prompt || '';
+        // 提示词存储位置提示：文件引用模式显示来源文件，内联模式提示将存入 config.yaml
+        setPromptHint('cfg-system-prompt-hint', cfg.agent?.system_prompt_file);
+        setPromptHint('cfg-user-prompt-hint', cfg.agent?.user_prompt_file);
     } catch (e) {
         showToast('加载失败: ' + e.message, 'error');
     }
