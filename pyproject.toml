@@ -6,4 +6,10 @@ requires-python = ">=3.10"
 dependencies = [
     "openai>=1.0.0",
     "pyyaml>=6.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
 ]
+
+[tool.setuptools]
+# 本项目为扁平结构（多个顶层 .py 文件），显式列出模块避免自动发现误打包 web/prompt 等目录
+py-modules = ["main", "agent_loop", "config_loader", "webui"]

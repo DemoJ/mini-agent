@@ -184,21 +184,32 @@ class Agent:
         发送用户消息，让 Agent 自主决定行为。
         返回 Agent 的最终回复文本。
         """
+        result = self.chat_with_steps(user_input)
+        return result["reply"]
+
+    def chat_with_steps(self, user_input: str) -> dict:
+        """
+        同 chat()，但额外返回过程步骤（思考内容 + 工具调用）。
+        返回 dict: { "reply": str|None, "steps": list[dict], "error": str|None }
+        """
         self.messages.append({"role": "user", "content": user_input})
+        steps: list[dict] = []
 
         for step in range(self.max_internal_steps):
-            response, err = self._call_llm()
+            try:
+                response, err = self._call_llm()
+            except Exception as e:
+                return {"reply": None, "steps": steps, "error": f"LLM 调用失败: {e}"}
             if err:
-                print(f"  [错误] {err}")
-                return None
+                return {"reply": None, "steps": steps, "error": err}
 
             choice = response.choices[0]
             msg = choice.message
 
-            # 打印思考内容（部分模型通过 reasoning_effort 启用后返回）
+            # 思考内容（部分模型通过 reasoning_effort 启用后返回）
             reasoning = getattr(msg, "reasoning_content", None)
             if reasoning:
-                print(f"  🤔 {reasoning}")
+                steps.append({"type": "reasoning", "content": reasoning})
 
             # --- 工具调用 ---
             if msg.tool_calls:
@@ -219,12 +230,16 @@ class Agent:
                             "tool_call_id": tc.id,
                             "content": json.dumps({"ok": True}),
                         })
-                        return summary
+                        return {"reply": summary, "steps": steps, "error": None}
 
                     # 普通工具 → 执行并暂存结果
-                    print(f"  🔧 {tc.function.name}({json.dumps(tool_args, ensure_ascii=False)})")
                     result_str = execute_tool_call(tc.function.name, tool_args)
-                    print(f"  ⬅ {result_str[:200]}")
+                    steps.append({
+                        "type": "tool_call",
+                        "name": tc.function.name,
+                        "args": tool_args,
+                        "result": result_str,
+                    })
                     tool_results.append((tc, result_str))
 
                 # 一轮中所有工具调用完成后，统一写入历史
@@ -241,10 +256,153 @@ class Agent:
             # --- 纯文本回复（无工具调用）→ 作为本轮回答返回 ---
             answer = msg.content or ""
             self.messages.append({"role": "assistant", "content": answer})
-            return answer
+            return {"reply": answer, "steps": steps, "error": None}
 
-        print("  [结束] 达到内部步数上限")
-        return None
+        return {"reply": None, "steps": steps, "error": "达到内部步数上限"}
+
+    def chat_stream(self, user_input: str):
+        """
+        流式版本：生成器逐片 yield 事件字典。
+
+        事件类型：
+        - {"type": "reasoning_delta", "content": str}  思考内容增量
+        - {"type": "reply_delta", "content": str}      回复正文增量（含中间说明）
+        - {"type": "tool_call", "id": str, "name": str, "args": dict}   工具调用（参数完整后发出）
+        - {"type": "tool_result", "id": str, "name": str, "result": str} 工具执行结果
+        - {"type": "done", "error": str | None, "reply": str | None}    结束
+        """
+        self.messages.append({"role": "user", "content": user_input})
+
+        for step in range(self.max_internal_steps):
+            try:
+                stream = self._call_llm_stream()
+            except Exception as e:
+                yield {"type": "done", "error": f"LLM 调用失败: {e}", "reply": None}
+                return
+
+            content_acc = ""
+            tool_calls_acc: dict[int, dict] = {}
+
+            try:
+                for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+
+                    # 思考内容增量（部分模型在启用 reasoning_effort 后返回）
+                    reasoning_delta = getattr(delta, "reasoning_content", None)
+                    if reasoning_delta:
+                        yield {"type": "reasoning_delta", "content": reasoning_delta}
+
+                    # 正文增量
+                    if delta.content:
+                        content_acc += delta.content
+                        yield {"type": "reply_delta", "content": delta.content}
+
+                    # 工具调用增量（按 index 累积 arguments 分片）
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index
+                            if idx not in tool_calls_acc:
+                                tool_calls_acc[idx] = {
+                                    "id": "",
+                                    "name": "",
+                                    "arguments": "",
+                                }
+                            if tc.id:
+                                tool_calls_acc[idx]["id"] = tc.id
+                            if tc.function:
+                                if tc.function.name:
+                                    tool_calls_acc[idx]["name"] = tc.function.name
+                                if tc.function.arguments:
+                                    tool_calls_acc[idx]["arguments"] += tc.function.arguments
+            except Exception as e:
+                yield {"type": "done", "error": f"流式读取失败: {e}", "reply": None}
+                return
+
+            has_tool_calls = bool(tool_calls_acc)
+            sorted_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
+
+            if has_tool_calls:
+                # 写入 assistant 消息（含 tool_calls）
+                self.messages.append({
+                    "role": "assistant",
+                    "content": content_acc or "",
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": tc["arguments"],
+                            },
+                        }
+                        for tc in sorted_calls
+                    ],
+                })
+
+                # 逐个执行工具
+                for tc in sorted_calls:
+                    try:
+                        tool_args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                    except json.JSONDecodeError:
+                        tool_args = {}
+
+                    # finish → Agent 自主完成
+                    # 把 summary 作为回复正文流式发出，避免与前面的解释文字混在一个气泡
+                    if tc["name"] == "finish":
+                        summary = tool_args.get("summary", "")
+                        self.messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": json.dumps({"ok": True}, ensure_ascii=False),
+                        })
+                        yield {"type": "tool_call", "id": tc["id"], "name": tc["name"], "args": tool_args}
+                        yield {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": json.dumps({"ok": True}, ensure_ascii=False)}
+                        if summary:
+                            yield {"type": "reply_delta", "content": summary}
+                        yield {"type": "done", "error": None, "reply": None}
+                        return
+
+                    # 普通工具 → 执行
+                    yield {"type": "tool_call", "id": tc["id"], "name": tc["name"], "args": tool_args}
+                    result_str = execute_tool_call(tc["name"], tool_args)
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result_str,
+                    })
+                    yield {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": result_str}
+
+                # 继续下一轮 LLM 调用
+                continue
+
+            # 纯文本回复 → 结束
+            self.messages.append({"role": "assistant", "content": content_acc})
+            yield {"type": "done", "error": None, "reply": content_acc}
+            return
+
+        # 达到步数上限
+        yield {"type": "done", "error": "达到内部步数上限", "reply": None}
+
+    def _call_llm_stream(self):
+        """流式调用 LLM，返回 chunk 迭代器。"""
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": self.system_prompt},
+            *self.messages,
+        ]
+        kwargs: dict[str, Any] = dict(
+            model=self.model,
+            messages=messages,
+            tools=self.openai_tools,
+            tool_choice="auto",
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            stream=True,
+        )
+        if self.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        return self.client.chat.completions.create(**kwargs)
 
     def _append_assistant(self, msg: Any) -> None:
         """将 assistant 消息（含 tool_calls）加入历史。"""

@@ -18,6 +18,15 @@ def _load_yaml(path: str | Path) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
+def _mask_api_key(key: str) -> str:
+    """脱敏 API Key：保留前 4 + 后 4 位，中间星号。短 key 全部星号。"""
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "*" * len(key)
+    return f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
+
+
 class APIConfig:
     """OpenAI 兼容 API 配置"""
 
@@ -25,6 +34,13 @@ class APIConfig:
         self.base_url: str = cfg.get("base_url", "https://api.openai.com/v1")
         self.api_key: str = cfg.get("api_key", "")
         self.model: str = cfg.get("model", "gpt-4o")
+
+    def to_dict(self, mask_key: bool = False) -> dict[str, Any]:
+        return {
+            "base_url": self.base_url,
+            "api_key": _mask_api_key(self.api_key) if mask_key else self.api_key,
+            "model": self.model,
+        }
 
 
 class AgentConfig:
@@ -52,15 +68,32 @@ class AgentConfig:
             return path.read_text(encoding="utf-8")
         return val
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "max_steps": self.max_steps,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "reasoning_effort": self.reasoning_effort or "none",
+            "system_prompt": self.system_prompt,
+            "user_prompt": self.user_prompt,
+        }
+
 
 class Config:
     """全局配置"""
 
     def __init__(self, path: str | Path = "config.yaml") -> None:
-        raw = _load_yaml(path)
-        base_dir = Path(path).parent
+        self.path = Path(path)
+        raw = _load_yaml(self.path)
+        base_dir = self.path.parent
         self.api = APIConfig(raw.get("api", {}))
         self.agent = AgentConfig(raw.get("agent", {}), base_dir)
+
+    def to_dict(self, mask_key: bool = False) -> dict[str, Any]:
+        return {
+            "api": self.api.to_dict(mask_key=mask_key),
+            "agent": self.agent.to_dict(),
+        }
 
 
 # 模块级单例，方便各处引用
@@ -77,3 +110,32 @@ def get_config() -> Config:
     if config is None:
         raise RuntimeError("配置尚未加载，请先调用 load_config()")
     return config
+
+
+def save_config(data: dict[str, Any], path: str | Path = "config.yaml") -> Config:
+    """
+    把配置字典写回 yaml 文件，并重新加载模块级单例。
+
+    data 结构：{"api": {...}, "agent": {...}}
+    reasoning_effort 为 "none" 时写为 null。
+    """
+    path = Path(path)
+
+    # 规范化 reasoning_effort：none → null
+    agent_data = dict(data.get("agent", {}))
+    re = agent_data.get("reasoning_effort", "none")
+    if re is None or str(re).lower() == "none":
+        agent_data["reasoning_effort"] = None
+    else:
+        agent_data["reasoning_effort"] = str(re)
+
+    out = {
+        "api": data.get("api", {}),
+        "agent": agent_data,
+    }
+
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(out, f, allow_unicode=True, sort_keys=False)
+
+    # 重新加载
+    return load_config(path)

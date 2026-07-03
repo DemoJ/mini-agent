@@ -35,7 +35,24 @@ api:
 pip install -e .
 ```
 
+> 国内网络建议使用镜像源加速：
+>
+> ```bash
+> pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
+> ```
+>
+> 可选镜像源：
+> - 清华：`https://pypi.tuna.tsinghua.edu.cn/simple`
+> - 阿里：`https://mirrors.aliyun.com/pypi/simple/`
+> - 腾讯：`https://mirrors.cloud.tencent.com/pypi/simple`
+> - 中科大：`https://pypi.mirrors.ustc.edu.cn/simple/`
+
+
 ### 3. 运行
+
+提供两种交互方式：
+
+#### 命令行 REPL
 
 ```bash
 python main.py
@@ -43,15 +60,37 @@ python main.py
 
 直接进入交互式对话，输入 `/exit` 退出，`/reset` 清空历史。
 
+#### WebUI
+
+```bash
+python webui.py                 # 默认 127.0.0.1:8000
+python webui.py --port 8080     # 自定义端口
+```
+
+浏览器打开 `http://127.0.0.1:8000`：
+
+- **对话页**：输入消息与 Agent 对话，可查看思考内容（开启 `reasoning_effort` 时）和工具调用过程
+- **设置页**：在线编辑 API 配置和 Agent 参数，保存后即时生效并写回 `config.yaml`
+
+> WebUI 为单 Agent 串行处理，同一时刻只处理一条消息。对话历史仅保留在内存中，刷新页面会清空。
+
 ## 项目结构
 
 ```
 mini-agent/
-├── main.py                 # 入口，REPL 交互
+├── main.py                 # REPL 入口
+├── webui.py                # WebUI 入口（FastAPI）
 ├── agent_loop.py           # Agent 自主循环 + 工具注册
-├── config_loader.py        # 配置加载模块
+├── config_loader.py        # 配置加载/保存模块
 ├── config.yaml             # 本地配置（已 gitignore）
 ├── config.yaml.example     # 示例配置
+├── pip.ini.example         # pip 镜像源示例配置
+├── web/                    # WebUI 前端
+│   ├── index.html          # 单页前端
+│   ├── app.js              # 交互逻辑
+│   └── style.css           # 样式
+├── docs/
+│   └── webui-requirements.md  # WebUI 需求文档
 ├── prompt/
 │   ├── system.md           # 系统提示词
 │   └── user.md             # 用户提示词模板

@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>mini-agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- 顶部栏 -->
+    <header class="topbar">
+        <div class="brand">
+            <div class="brand-mark">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/>
+                </svg>
+            </div>
+            <span class="brand-name">mini-agent</span>
+        </div>
+        <div class="topbar-actions">
+            <button class="icon-btn" onclick="resetChat()" title="清空对话">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+            <button class="icon-btn" onclick="openSettings()" title="设置">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- 对话页（唯一主界面） -->
+    <main class="chat-page">
+        <div id="messages" class="messages">
+            <div class="welcome">
+                <div class="welcome-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>
+                </div>
+                <h1>开始对话</h1>
+                <p>mini-agent 是一个自主 Agent，能调用工具、自主多步推理。输入消息开始。</p>
+                <div class="welcome-examples">
+                    <button class="example-chip" onclick="useExample(this)">帮我看看当前目录有哪些文件</button>
+                    <button class="example-chip" onclick="useExample(this)">现在几点了？</button>
+                    <button class="example-chip" onclick="useExample(this)">查看 Python 版本</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="status-bar" class="status-bar" hidden>
+            <span class="spinner"></span>
+            <span id="status-text">思考中</span>
+            <span class="status-dots"><span></span><span></span><span></span></span>
+        </div>
+        <div id="error-bar" class="error-bar" hidden></div>
+
+        <div class="composer">
+            <div class="composer-inner">
+                <textarea id="chat-input" rows="1" placeholder="给 mini-agent 发送消息…" autocomplete="off"></textarea>
+                <button id="send-btn" class="send-btn" onclick="sendChat()" disabled>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                </button>
+            </div>
+            <div class="composer-hint">
+                <span><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
+            </div>
+        </div>
+    </main>
+
+    <!-- 设置抽屉（覆盖浮层） -->
+    <div id="settings-overlay" class="overlay" hidden onclick="if(event.target===this)closeSettings()"></div>
+    <aside id="settings-drawer" class="drawer" hidden>
+        <header class="drawer-header">
+            <div>
+                <h2>设置</h2>
+                <p>修改后保存即生效，配置写回 config.yaml</p>
+            </div>
+            <button class="icon-btn" onclick="closeSettings()" title="关闭">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </header>
+
+        <form id="settings-form" class="drawer-body" onsubmit="saveSettings(event)">
+            <section class="settings-section">
+                <div class="section-header">
+                    <div class="section-icon api-icon">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg>
+                    </div>
+                    <div>
+                        <h3>API 配置</h3>
+                        <span>OpenAI 兼容端点与凭证</span>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="cfg-base-url">Base URL</label>
+                    <input type="text" id="cfg-base-url" autocomplete="off" placeholder="https://api.openai.com/v1">
+                </div>
+                <div class="field">
+                    <label for="cfg-api-key">API Key</label>
+                    <div class="input-with-action">
+                        <input type="password" id="cfg-api-key" autocomplete="off" placeholder="sk-...">
+                        <button type="button" class="ghost-btn" onclick="toggleKeyVisible()" id="key-toggle-btn">显示</button>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="cfg-model">Model</label>
+                    <input type="text" id="cfg-model" autocomplete="off" placeholder="gpt-4o">
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <div class="section-header">
+                    <div class="section-icon agent-icon">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>
+                    </div>
+                    <div>
+                        <h3>Agent 配置</h3>
+                        <span>推理行为与生成参数</span>
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="cfg-max-steps">Max Steps</label>
+                        <input type="number" id="cfg-max-steps" min="1" max="200">
+                    </div>
+                    <div class="field">
+                        <label for="cfg-temperature">Temperature</label>
+                        <input type="number" id="cfg-temperature" step="0.1" min="0" max="2">
+                    </div>
+                </div>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="cfg-max-tokens">Max Tokens</label>
+                        <input type="number" id="cfg-max-tokens" min="1">
+                    </div>
+                    <div class="field">
+                        <label for="cfg-reasoning-effort">Reasoning Effort</label>
+                        <select id="cfg-reasoning-effort">
+                            <option value="none">none · 关闭思考</option>
+                            <option value="low">low · 轻量思考</option>
+                            <option value="medium">medium · 中等思考</option>
+                            <option value="high">high · 深度思考</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="cfg-system-prompt">System Prompt</label>
+                    <textarea id="cfg-system-prompt" rows="6" class="mono"></textarea>
+                </div>
+                <div class="field">
+                    <label for="cfg-user-prompt">User Prompt</label>
+                    <textarea id="cfg-user-prompt" rows="6" class="mono"></textarea>
+                    <span class="field-hint">可用 <code>{task}</code> 占位符</span>
+                </div>
+            </section>
+
+            <div class="drawer-actions">
+                <button type="button" class="ghost-btn" onclick="loadSettings()">放弃改动</button>
+                <button type="submit" class="primary-btn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                    保存配置
+                </button>
+            </div>
+            <p class="drawer-hint">保存后 api_key 明文写入 config.yaml（已在 .gitignore 中），并即时重建 Agent。</p>
+        </form>
+        <div id="settings-toast" class="toast" hidden></div>
+    </aside>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
