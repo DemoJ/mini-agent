@@ -74,6 +74,7 @@ class Agent:
         self.client = OpenAI(
             base_url=cfg.api.base_url,
             api_key=cfg.api.api_key,
+            timeout=120.0,  # 避免网络或 LLM 无响应时无限阻塞（SDK 默认 600s 太长）
         )
         self.model = cfg.api.model
         self.temperature = cfg.agent.temperature
@@ -115,9 +116,14 @@ class Agent:
         # ---- 停止控制（WebUI 停止按钮用）----
         # _stop_event: 跨线程停止标志，request_stop() 置位，chat_stream/chat_with_steps 轮询检查
         # _proc_lock + _current_proc: 当前 bash 子进程引用，停止时 terminate 它
+        # _stream_lock + _current_stream: 当前 LLM 流式响应引用，停止时 close 中断阻塞读取
+        # _generation: 对话代际，强制停止后旧生成器检测到过期则不修改 messages
         self._stop_event = threading.Event()
         self._proc_lock = threading.Lock()
         self._current_proc: subprocess.Popen | None = None
+        self._stream_lock = threading.Lock()
+        self._current_stream: Any = None
+        self._generation: int = 0
 
     # --------------------------------------------------------
     # 工具注册与刷新
@@ -370,6 +376,7 @@ class Agent:
 
         1. 置位停止标志，chat_stream/chat_with_steps 在下个检查点退出
         2. 终止当前正在运行的 bash 子进程（如果有），让 _do_bash 立即返回
+        3. 关闭当前 LLM 流式响应（如果有），中断阻塞的 chunk 读取
         """
         self._stop_event.set()
         with self._proc_lock:
@@ -377,6 +384,13 @@ class Agent:
         if proc is not None and proc.poll() is None:
             try:
                 proc.terminate()
+            except Exception:
+                pass
+        with self._stream_lock:
+            stream = self._current_stream
+        if stream is not None:
+            try:
+                stream.close()
             except Exception:
                 pass
 
@@ -455,13 +469,18 @@ class Agent:
             with self._proc_lock:
                 self._current_proc = None
 
-    def _cleanup_interrupted_messages(self) -> None:
+    def _cleanup_interrupted_messages(self, my_gen: int = -1) -> None:
         """停止后清理消息历史，确保一致性。
 
         问题：如果在 assistant 消息（含 tool_calls）已追加但 tool 结果未全部追加时停止，
         下一轮 API 调用会因缺少 tool 结果报错。
         解决：扫描所有 assistant tool_calls，为没有对应 tool 结果的补占位结果。
+
+        my_gen: 调用方的代际；若与 self._generation 不符则跳过
+        （防止强制停止后旧生成器污染新请求的 messages）。
         """
+        if my_gen >= 0 and my_gen != self._generation:
+            return
         # 收集所有已有结果的 tool_call_id
         answered_ids: set[str] = set()
         for msg in self.messages:
@@ -712,13 +731,15 @@ class Agent:
         返回 dict: { "reply": str|None, "steps": list[dict], "error": str|None }
         """
         self._stop_event.clear()
+        self._generation += 1
+        my_gen = self._generation
         self.messages.append({"role": "user", "content": user_input})
         steps: list[dict] = []
 
         for step in range(self.max_internal_steps):
             # 检查停止
             if self._stop_event.is_set():
-                self._cleanup_interrupted_messages()
+                self._cleanup_interrupted_messages(my_gen)
                 return {"reply": None, "steps": steps, "error": "已停止"}
             try:
                 response, err = self._call_llm()
@@ -742,7 +763,7 @@ class Agent:
                 for tc in msg.tool_calls:
                     # 检查停止（工具执行前）
                     if self._stop_event.is_set():
-                        self._cleanup_interrupted_messages()
+                        self._cleanup_interrupted_messages(my_gen)
                         return {"reply": None, "steps": steps, "error": "已停止"}
                     try:
                         tool_args = json.loads(tc.function.arguments)
@@ -800,14 +821,17 @@ class Agent:
         - {"type": "done", "error": str | None, "reply": str | None}    结束
 
         支持停止：request_stop() 置位 _stop_event 后，在检查点退出并清理消息历史。
+        request_stop() 还会 close 当前 LLM stream，中断阻塞的 chunk 读取。
         """
         self._stop_event.clear()
+        self._generation += 1
+        my_gen = self._generation
         self.messages.append({"role": "user", "content": user_input})
 
         for step in range(self.max_internal_steps):
             # 检查点 1：每轮 LLM 调用前
             if self._stop_event.is_set():
-                self._cleanup_interrupted_messages()
+                self._cleanup_interrupted_messages(my_gen)
                 yield {"type": "done", "error": "已停止", "reply": None}
                 return
 
@@ -816,6 +840,10 @@ class Agent:
             except Exception as e:
                 yield {"type": "done", "error": f"LLM 调用失败: {e}", "reply": None}
                 return
+
+            # 存储 stream 引用，供 request_stop() close 中断阻塞读取
+            with self._stream_lock:
+                self._current_stream = stream
 
             content_acc = ""
             tool_calls_acc: dict[int, dict] = {}
@@ -862,16 +890,18 @@ class Agent:
                 yield {"type": "done", "error": f"流式读取失败: {e}", "reply": None}
                 return
             finally:
-                # 停止或异常时关闭底层流式连接，释放资源
-                if stopped_during_stream:
-                    try:
-                        stream.close()
-                    except Exception:
-                        pass
+                # 清理 stream 引用并关闭连接（无论正常结束、停止还是异常）
+                with self._stream_lock:
+                    if self._current_stream is stream:
+                        self._current_stream = None
+                try:
+                    stream.close()
+                except Exception:
+                    pass
 
             # 检查点 2 后续：流式中被停止 → 不追加不完整的 assistant 消息，清理后退出
             if stopped_during_stream or self._stop_event.is_set():
-                self._cleanup_interrupted_messages()
+                self._cleanup_interrupted_messages(my_gen)
                 yield {"type": "done", "error": "已停止", "reply": None}
                 return
 
@@ -900,7 +930,7 @@ class Agent:
                 for tc in sorted_calls:
                     # 检查点 3：每个工具执行前
                     if self._stop_event.is_set():
-                        self._cleanup_interrupted_messages()
+                        self._cleanup_interrupted_messages(my_gen)
                         yield {"type": "done", "error": "已停止", "reply": None}
                         return
 
@@ -935,7 +965,7 @@ class Agent:
                             "tool_call_id": tc["id"],
                             "content": result_str,
                         })
-                        self._cleanup_interrupted_messages()
+                        self._cleanup_interrupted_messages(my_gen)
                         yield {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": result_str}
                         yield {"type": "done", "error": "已停止", "reply": None}
                         return

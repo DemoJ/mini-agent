@@ -12,6 +12,7 @@ mini-agent WebUI 入口
 import argparse
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -40,7 +41,36 @@ CONFIG_PATH = "config.yaml"
 WEB_DIR = Path(__file__).parent / "web"
 
 _agent: Agent | None = None
-_agent_lock = threading.Lock()  # 串行化对话请求，避免上下文串话
+
+# 串行化对话请求的"处理槽"：用布尔标志 + 锁替代 threading.Lock。
+# 好处：停止端点可强制重置标志（threading.Lock 不能被非持有者释放），
+# 避免 LLM 调用卡死导致锁永不释放、新请求永远 409。
+_busy: bool = False
+_busy_lock = threading.Lock()
+
+
+def _try_acquire_busy() -> bool:
+    """尝试获取处理权（非阻塞）。成功返回 True，已被占用返回 False。"""
+    global _busy
+    with _busy_lock:
+        if _busy:
+            return False
+        _busy = True
+        return True
+
+
+def _release_busy() -> None:
+    """释放处理权（正常完成时调用）。"""
+    global _busy
+    with _busy_lock:
+        _busy = False
+
+
+def _force_release_busy() -> None:
+    """强制释放处理权（停止兜底用，即使旧生成器还在后台阻塞也重置）。"""
+    global _busy
+    with _busy_lock:
+        _busy = False
 
 
 def get_agent() -> Agent:
@@ -116,8 +146,7 @@ def api_chat(req: ChatRequest):
     if not text:
         raise HTTPException(status_code=400, detail="消息不能为空")
 
-    acquired = _agent_lock.acquire(blocking=False)
-    if not acquired:
+    if not _try_acquire_busy():
         return JSONResponse(
             status_code=409,
             content={"error": "当前已有对话在处理中，请稍后再试"},
@@ -125,6 +154,7 @@ def api_chat(req: ChatRequest):
     try:
         agent = get_agent()
     except FileNotFoundError:
+        _release_busy()
         return JSONResponse(
             status_code=400,
             content={"reply": None, "steps": [], "error": "config.yaml 不存在，请先在设置页配置或复制 config.example.yaml 为 config.yaml"},
@@ -135,7 +165,7 @@ def api_chat(req: ChatRequest):
     except Exception as e:
         return {"reply": None, "steps": [], "error": f"内部错误: {e}"}
     finally:
-        _agent_lock.release()
+        _release_busy()
 
 
 @app.post("/api/chat/stream")
@@ -156,8 +186,7 @@ def api_chat_stream(req: ChatRequest):
     if not text:
         raise HTTPException(status_code=400, detail="消息不能为空")
 
-    acquired = _agent_lock.acquire(blocking=False)
-    if not acquired:
+    if not _try_acquire_busy():
         return JSONResponse(
             status_code=409,
             content={"error": "当前已有对话在处理中，请稍后再试"},
@@ -166,7 +195,7 @@ def api_chat_stream(req: ChatRequest):
     try:
         agent = get_agent()
     except FileNotFoundError:
-        _agent_lock.release()
+        _release_busy()
         return JSONResponse(
             status_code=400,
             content={"error": "config.yaml 不存在，请先在设置页配置或复制 config.example.yaml 为 config.yaml"},
@@ -180,7 +209,7 @@ def api_chat_stream(req: ChatRequest):
             err = {"type": "done", "error": f"内部错误: {e}", "reply": None}
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
         finally:
-            _agent_lock.release()
+            _release_busy()
 
     return StreamingResponse(
         event_stream(),
@@ -196,12 +225,18 @@ def api_chat_stream(req: ChatRequest):
 @app.post("/api/reset")
 def api_reset():
     """清空对话历史。"""
-    with _agent_lock:
-        try:
-            agent = get_agent()
-        except FileNotFoundError:
-            raise HTTPException(status_code=400, detail="config.yaml 不存在")
+    if not _try_acquire_busy():
+        return JSONResponse(
+            status_code=409,
+            content={"error": "当前已有对话在处理中，请稍后再试"},
+        )
+    try:
+        agent = get_agent()
         agent.reset()
+    except FileNotFoundError:
+        raise HTTPException(status_code=400, detail="config.yaml 不存在")
+    finally:
+        _release_busy()
     return {"ok": True}
 
 
@@ -210,13 +245,18 @@ def api_stop_chat():
     """
     请求停止当前正在进行的对话。
 
-    线程安全地置位 agent 停止标志 + 终止当前 bash 子进程。
-    chat_stream 生成器在下个检查点检测到标志后退出并清理消息历史。
-    不需要获取 _agent_lock——只需设标志，不影响串行化逻辑。
+    1. 线程安全地置位 agent 停止标志 + 终止当前 bash 子进程 + 关闭 LLM stream。
+    2. 延迟 2 秒后强制释放处理槽（兜底）——防止 LLM 调用卡死导致 busy 永不释放、
+       新请求永远 409。即使旧生成器还在后台阻塞，2 秒后新请求也能进来。
+
+    注意：强制释放后旧生成器可能仍在后台运行，但它通过 generation 计数器
+    检测到自己已过期，不会修改 messages，最终会因 stream 被 close 而异常退出。
     """
     agent = _agent
     if agent is not None:
         agent.request_stop()
+    # 兜底：2 秒后强制释放处理槽
+    threading.Timer(2.0, _force_release_busy).start()
     return {"ok": True}
 
 
