@@ -205,6 +205,21 @@ def api_reset():
     return {"ok": True}
 
 
+@app.post("/api/chat/stop")
+def api_stop_chat():
+    """
+    请求停止当前正在进行的对话。
+
+    线程安全地置位 agent 停止标志 + 终止当前 bash 子进程。
+    chat_stream 生成器在下个检查点检测到标志后退出并清理消息历史。
+    不需要获取 _agent_lock——只需设标志，不影响串行化逻辑。
+    """
+    agent = _agent
+    if agent is not None:
+        agent.request_stop()
+    return {"ok": True}
+
+
 @app.get("/api/config")
 def api_get_config():
     """读取当前配置，api_key 脱敏返回。"""

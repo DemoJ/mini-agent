@@ -5,6 +5,12 @@
 const $ = (id) => document.getElementById(id);
 const messagesEl = () => $('messages');
 let sending = false;
+let stopped = false;                    // 用户主动停止标志
+let currentAbortController = null;      // 当前流式请求的 AbortController
+
+// 发送 / 停止按钮图标
+const SEND_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
+const STOP_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
 
 // ------------------------------------------------------------
 // 设置抽屉
@@ -42,6 +48,8 @@ async function sendChat() {
     if (!text) return;
 
     sending = true;
+    stopped = false;
+    currentAbortController = new AbortController();
     setSending(true);
     input.value = '';
     autoResize(input);
@@ -71,6 +79,7 @@ async function sendChat() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: text }),
+            signal: currentAbortController.signal,
         });
 
         if (resp.status === 409) {
@@ -119,15 +128,54 @@ async function sendChat() {
             }
         }
     } catch (e) {
-        showError('请求失败: ' + e.message);
+        // 用户主动停止导致的 AbortError 不报错
+        if (e.name === 'AbortError' || stopped) {
+            // 静默处理
+        } else {
+            showError('请求失败: ' + e.message);
+        }
     } finally {
         // 收尾：折叠思考块、移除流式状态
         finalizeReasoning(ctx);
         finalizeReply(ctx);
+        // 用户主动停止时追加提示
+        if (stopped && !ctx.replyHasContent) {
+            appendAgentMessage('（已停止）');
+        }
         setStatus('', false);
         sending = false;
+        stopped = false;
+        currentAbortController = null;
         setSending(false);
         $('chat-input').focus();
+    }
+}
+
+// ------------------------------------------------------------
+// 停止对话
+// ------------------------------------------------------------
+async function stopChat() {
+    if (!sending || stopped) return;
+    stopped = true;
+    setStatus('正在停止…', true);
+
+    // 1. 通知后端停止（设标志 + 终止子进程）
+    try {
+        await fetch('/api/chat/stop', { method: 'POST' });
+    } catch (e) { /* ignore */ }
+
+    // 2. 中止前端流式读取
+    if (currentAbortController) {
+        currentAbortController.abort();
+    }
+}
+
+// 发送按钮点击分发：发送中 → 停止，空闲 → 发送
+function onSendClick() {
+    if (sending) {
+        stopChat();
+    } else {
+        sendChat();
     }
 }
 
@@ -323,8 +371,21 @@ function formatResultCompact(result) {
 }
 
 function setSending(v) {
-    $('send-btn').disabled = v;
-    $('chat-input').disabled = v;
+    const btn = $('send-btn');
+    const input = $('chat-input');
+    if (v) {
+        // 发送中：按钮变停止按钮（不禁用，可点击停止）
+        btn.innerHTML = STOP_ICON;
+        btn.classList.add('stop-mode');
+        btn.disabled = false;
+        input.disabled = true;
+    } else {
+        // 空闲：恢复发送按钮
+        btn.innerHTML = SEND_ICON;
+        btn.classList.remove('stop-mode');
+        input.disabled = false;
+        updateSendBtn();
+    }
 }
 
 function appendUserMessage(text) {
@@ -603,8 +664,10 @@ function autoResize(textarea) {
 }
 
 function updateSendBtn() {
+    // 发送中按钮状态由 setSending 管理，不干预
+    if (sending) return;
     const input = $('chat-input');
-    $('send-btn').disabled = !input.value.trim() || sending;
+    $('send-btn').disabled = !input.value.trim();
 }
 
 // ------------------------------------------------------------

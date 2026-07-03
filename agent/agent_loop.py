@@ -17,7 +17,10 @@ Skill 采用三层懒加载：
 """
 
 import json
+import subprocess
 import sys
+import threading
+import time
 from datetime import datetime
 from typing import Any
 
@@ -108,6 +111,13 @@ class Agent:
             skills_index=skills_index,
         )
         self.messages: list[ChatCompletionMessageParam] = []
+
+        # ---- 停止控制（WebUI 停止按钮用）----
+        # _stop_event: 跨线程停止标志，request_stop() 置位，chat_stream/chat_with_steps 轮询检查
+        # _proc_lock + _current_proc: 当前 bash 子进程引用，停止时 terminate 它
+        self._stop_event = threading.Event()
+        self._proc_lock = threading.Lock()
+        self._current_proc: subprocess.Popen | None = None
 
     # --------------------------------------------------------
     # 工具注册与刷新
@@ -311,6 +321,8 @@ class Agent:
     def _execute_tool_call(self, tool_name: str, args: dict) -> str:
         """执行工具调用并返回序列化的结果字符串。"""
         # 需要访问 self 状态的工具特殊处理
+        if tool_name == "bash":
+            return self._do_bash(args.get("command", ""))
         if tool_name == "load_skill":
             return self._do_load_skill(args.get("name", ""))
         if tool_name == "list_skills":
@@ -348,6 +360,132 @@ class Agent:
                 ensure_ascii=False,
             )
         return json.dumps(result, ensure_ascii=False)
+
+    # --------------------------------------------------------
+    # 停止控制（WebUI 停止按钮）
+    # --------------------------------------------------------
+
+    def request_stop(self) -> None:
+        """请求停止当前对话（线程安全）。
+
+        1. 置位停止标志，chat_stream/chat_with_steps 在下个检查点退出
+        2. 终止当前正在运行的 bash 子进程（如果有），让 _do_bash 立即返回
+        """
+        self._stop_event.set()
+        with self._proc_lock:
+            proc = self._current_proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    def _do_bash(self, command: str) -> str:
+        """可中断版 bash 执行（替代 tools.builtin.tool_bash）。
+
+        与 tool_bash 的区别：用 Popen + poll 循环替代 subprocess.run，
+        在执行过程中检查 _stop_event，被停止时 terminate 子进程并立即返回。
+        CLI 模式下 _stop_event 永远不会被置位，行为等同 tool_bash。
+        """
+        try:
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except Exception as e:
+            return json.dumps(
+                {"success": False, "exit_code": -1, "stdout": "", "stderr": str(e)},
+                ensure_ascii=False,
+            )
+
+        with self._proc_lock:
+            self._current_proc = proc
+
+        try:
+            deadline = time.monotonic() + 30  # 30s 超时，与 tool_bash 一致
+            while True:
+                # 检查停止
+                if self._stop_event.is_set():
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    except Exception:
+                        pass
+                    return json.dumps(
+                        {"success": False, "exit_code": -1, "stdout": "", "stderr": "已停止"},
+                        ensure_ascii=False,
+                    )
+
+                ret = proc.poll()
+                if ret is not None:
+                    stdout, stderr = proc.communicate()
+                    return json.dumps(
+                        {
+                            "success": ret == 0,
+                            "exit_code": ret,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                        },
+                        ensure_ascii=False,
+                    )
+
+                # 超时
+                if time.monotonic() > deadline:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    except Exception:
+                        pass
+                    return json.dumps(
+                        {"success": False, "exit_code": -1, "stdout": "", "stderr": "命令执行超时"},
+                        ensure_ascii=False,
+                    )
+
+                time.sleep(0.1)
+        finally:
+            with self._proc_lock:
+                self._current_proc = None
+
+    def _cleanup_interrupted_messages(self) -> None:
+        """停止后清理消息历史，确保一致性。
+
+        问题：如果在 assistant 消息（含 tool_calls）已追加但 tool 结果未全部追加时停止，
+        下一轮 API 调用会因缺少 tool 结果报错。
+        解决：扫描所有 assistant tool_calls，为没有对应 tool 结果的补占位结果。
+        """
+        # 收集所有已有结果的 tool_call_id
+        answered_ids: set[str] = set()
+        for msg in self.messages:
+            if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                answered_ids.add(msg["tool_call_id"])
+
+        # 为缺失结果的 tool_call 补占位
+        for msg in self.messages:
+            if msg.get("role") != "assistant":
+                continue
+            tool_calls = msg.get("tool_calls")
+            if not tool_calls:
+                continue
+            for tc in tool_calls:
+                tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                if tc_id and tc_id not in answered_ids:
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": json.dumps(
+                            {"error": "已停止，未执行"}, ensure_ascii=False
+                        ),
+                    })
+                    answered_ids.add(tc_id)
 
     # --------------------------------------------------------
     # LLM 调用
@@ -573,10 +711,15 @@ class Agent:
         同 chat()，但额外返回过程步骤（思考内容 + 工具调用）。
         返回 dict: { "reply": str|None, "steps": list[dict], "error": str|None }
         """
+        self._stop_event.clear()
         self.messages.append({"role": "user", "content": user_input})
         steps: list[dict] = []
 
         for step in range(self.max_internal_steps):
+            # 检查停止
+            if self._stop_event.is_set():
+                self._cleanup_interrupted_messages()
+                return {"reply": None, "steps": steps, "error": "已停止"}
             try:
                 response, err = self._call_llm()
             except Exception as e:
@@ -597,6 +740,10 @@ class Agent:
                 tool_results: list[tuple[Any, str]] = []
 
                 for tc in msg.tool_calls:
+                    # 检查停止（工具执行前）
+                    if self._stop_event.is_set():
+                        self._cleanup_interrupted_messages()
+                        return {"reply": None, "steps": steps, "error": "已停止"}
                     try:
                         tool_args = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
@@ -651,10 +798,19 @@ class Agent:
         - {"type": "tool_call", "id": str, "name": str, "args": dict}   工具调用（参数完整后发出）
         - {"type": "tool_result", "id": str, "name": str, "result": str} 工具执行结果
         - {"type": "done", "error": str | None, "reply": str | None}    结束
+
+        支持停止：request_stop() 置位 _stop_event 后，在检查点退出并清理消息历史。
         """
+        self._stop_event.clear()
         self.messages.append({"role": "user", "content": user_input})
 
         for step in range(self.max_internal_steps):
+            # 检查点 1：每轮 LLM 调用前
+            if self._stop_event.is_set():
+                self._cleanup_interrupted_messages()
+                yield {"type": "done", "error": "已停止", "reply": None}
+                return
+
             try:
                 stream = self._call_llm_stream()
             except Exception as e:
@@ -663,9 +819,14 @@ class Agent:
 
             content_acc = ""
             tool_calls_acc: dict[int, dict] = {}
+            stopped_during_stream = False
 
             try:
                 for chunk in stream:
+                    # 检查点 2：流式读取每个 chunk 之间
+                    if self._stop_event.is_set():
+                        stopped_during_stream = True
+                        break
                     if not chunk.choices:
                         continue
                     delta = chunk.choices[0].delta
@@ -700,6 +861,19 @@ class Agent:
             except Exception as e:
                 yield {"type": "done", "error": f"流式读取失败: {e}", "reply": None}
                 return
+            finally:
+                # 停止或异常时关闭底层流式连接，释放资源
+                if stopped_during_stream:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+
+            # 检查点 2 后续：流式中被停止 → 不追加不完整的 assistant 消息，清理后退出
+            if stopped_during_stream or self._stop_event.is_set():
+                self._cleanup_interrupted_messages()
+                yield {"type": "done", "error": "已停止", "reply": None}
+                return
 
             has_tool_calls = bool(tool_calls_acc)
             sorted_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
@@ -724,6 +898,12 @@ class Agent:
 
                 # 逐个执行工具
                 for tc in sorted_calls:
+                    # 检查点 3：每个工具执行前
+                    if self._stop_event.is_set():
+                        self._cleanup_interrupted_messages()
+                        yield {"type": "done", "error": "已停止", "reply": None}
+                        return
+
                     try:
                         tool_args = json.loads(tc["arguments"]) if tc["arguments"] else {}
                     except json.JSONDecodeError:
@@ -748,6 +928,17 @@ class Agent:
                     # 普通工具（含 load_skill）→ 执行
                     yield {"type": "tool_call", "id": tc["id"], "name": tc["name"], "args": tool_args}
                     result_str = self._execute_tool_call(tc["name"], tool_args)
+                    # 工具执行后再次检查停止（bash 可能因停止而返回 "已停止"）
+                    if self._stop_event.is_set():
+                        self.messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result_str,
+                        })
+                        self._cleanup_interrupted_messages()
+                        yield {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": result_str}
+                        yield {"type": "done", "error": "已停止", "reply": None}
+                        return
                     self.messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],

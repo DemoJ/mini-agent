@@ -451,6 +451,12 @@ input, textarea, select { font-family: inherit; font-size: 14px; }
 }
 .send-btn:hover:not(:disabled) { background: var(--accent-hover); transform: translateY(-1px); }
 .send-btn:disabled { background: var(--border-strong); cursor: not-allowed; }
+/* 停止模式：发送中按钮变红色停止按钮 */
+.send-btn.stop-mode {
+    background: var(--error);
+    transform: none;
+}
+.send-btn.stop-mode:hover { background: #b91c1c; transform: none; }
 .composer-hint {
     max-width: 820px;
     margin: 8px auto 0;
