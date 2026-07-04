@@ -1,7 +1,6 @@
 # ====================================================================
 # mini-agent Dockerfile (构建+运行时全镜像源版)
-# - 构建时：APT、Node.js、pip 全部走国内镜像（探测后择一或顺序 fallback）
-# - 运行时：apt、pip、npm 全局配置已设好，开箱即用
+# - 目标：预装 node.js、curl、pipx、git，构建时全部走国内镜像加速
 # ====================================================================
 FROM python:3.11-slim
 
@@ -9,7 +8,8 @@ WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    PATH="/root/.local/bin:${PATH}"
 
 # -------------------- 构建时探测可用 APT 镜像 --------------------
 # 动态读取真实系统代号（trixie/bookworm/...），并处理新版 Debian 基础镜像
@@ -42,15 +42,15 @@ RUN set -eux; \
     cat /etc/apt/sources.list 2>/dev/null || true; \
     cat /etc/apt/sources.list.d/*.sources 2>/dev/null || true
 
-# 安装基础工具
+# -------------------- 安装基础工具：curl、git、pipx 等 --------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash \
         curl \
         ca-certificates \
         tzdata \
         git \
-        gnupg \
         xz-utils \
+        pipx \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
@@ -63,18 +63,14 @@ RUN curl -fsSL https://mirrors.tuna.tsinghua.edu.cn/nodejs-release/v${NODE_VERSI
     && tar -xJf node.tar.xz -C /usr/local --strip-components=1 \
     && rm node.tar.xz
 
-# -------------------- 运行时 pip 全局配置（容器内任何 pip install 都走国内源）----
+# -------------------- 运行时 pip 全局配置 --------------------
+# 这里配置的是系统级 /etc/pip.conf，无论是直接 pip install 还是通过 pipx
+# 在隔离的 venv 里安装工具，pip 都会读取这个全局配置文件，自动走国内源。
 RUN mkdir -p /etc/pip \
     && echo "[global]" > /etc/pip.conf \
     && echo "index-url = https://pypi.tuna.tsinghua.edu.cn/simple" >> /etc/pip.conf \
     && echo "extra-index-url = https://mirrors.aliyun.com/pypi/simple/ https://mirrors.tencent.com/pypi/simple/" >> /etc/pip.conf \
     && echo "trusted-host = pypi.tuna.tsinghua.edu.cn mirrors.aliyun.com mirrors.tencent.com" >> /etc/pip.conf
-
-# -------------------- 运行时 npm 全局配置（容器内任何 npm install 都走淘宝镜像）--
-RUN npm config --global set registry https://registry.npmmirror.com \
-    && npm config --global set disturl https://npmmirror.com/dist \
-    && npm config --global set electron_mirror https://npmmirror.com/mirrors/electron/ \
-    && npm config --global set python_mirror https://npmmirror.com/mirrors/python/
 
 # -------------------- 构建时安装项目 Python 依赖（显式指定国内源）---------------
 RUN pip install --no-cache-dir \
