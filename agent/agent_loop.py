@@ -158,7 +158,7 @@ class Agent:
     def _do_load_skill(self, name: str) -> str:
         """
         执行 skill 加载：
-          1. 查注册表，不存在则报错
+          1. 查注册表，不存在则懒刷新一次再查（兜底启动后新增的 skill）
           2. 已加载则幂等返回
           3. 读 SKILL.md 正文 + tools.py
           4. 以 {skill}__{tool} 命名空间注册工具
@@ -167,6 +167,12 @@ class Agent:
           7. 返回 SKILL.md 正文作为 tool result（注入对话）
         """
         info = self.skills_registry.get(name)
+        if info is None:
+            # 懒刷新：skills/ 目录可能在 Agent 启动后才出现新增项
+            # （如手动建符号链接、外部 git clone 等，绕过了 install_skill
+            # 的刷新路径）。此处兜底重扫一次，避免 load_skill 永远找不到。
+            self._refresh_skills_after_change()
+            info = self.skills_registry.get(name)
         if info is None:
             avail = ", ".join(self.skills_registry.keys()) or "(无)"
             return json.dumps(
