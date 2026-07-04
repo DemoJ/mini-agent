@@ -305,8 +305,11 @@ class Agent:
         """为 system prompt 生成当前可用工具列表文本。"""
         lines = []
         for name, tool in self.tools.items():
-            param_hints = ", ".join(tool["parameters"].get("required", []))
-            lines.append(f"- {name}({param_hints}): {tool['description']}")
+            required = tool.get("parameters", {}).get("required", [])
+            # 防御：required 中可能混入非 str 元素（如 skill tools.py schema 写错），
+            # 统一转 str 避免 join 报 TypeError
+            param_hints = ", ".join(str(r) for r in required)
+            lines.append(f"- {name}({param_hints}): {tool.get('description', '')}")
         return "\n".join(lines)
 
     def _build_skills_index(self) -> str:
@@ -558,7 +561,8 @@ class Agent:
             desc = fn.get("description", "")
             params = fn.get("parameters", {})
             required = params.get("required", [])
-            lines.append(f"  - {name}({', '.join(required)}): {desc}")
+            required_str = ", ".join(str(r) for r in required) if required else ""
+            lines.append(f"  - {name}({required_str}): {desc}")
         return "\n".join(lines)
 
     def _log_llm_request(

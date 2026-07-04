@@ -194,6 +194,9 @@ def save_config(data: dict[str, Any], path: str | Path = "config.yaml") -> Confi
     破坏原本的 `prompt/system.md` / `prompt/user.md` 文件引用结构。
 
     reasoning_effort 为 "none" 时写为 null。
+
+    保留字段：前端只发送 api / agent 两段，debug 段和 agent.skills_dir
+    不在表单中，写盘时从旧配置继承，避免保存后丢失。
     """
     path = Path(path)
     base_dir = path.parent
@@ -211,6 +214,10 @@ def save_config(data: dict[str, Any], path: str | Path = "config.yaml") -> Confi
     # 前端可能回传 system_prompt_file / user_prompt_file（仅展示用），写盘时剔除
     agent_data.pop("system_prompt_file", None)
     agent_data.pop("user_prompt_file", None)
+
+    # 前端不发送 skills_dir，保留旧值
+    if "skills_dir" not in agent_data and "skills_dir" in old_agent_raw:
+        agent_data["skills_dir"] = old_agent_raw["skills_dir"]
 
     # 规范化 reasoning_effort：none → null
     re = agent_data.get("reasoning_effort", "none")
@@ -231,10 +238,15 @@ def save_config(data: dict[str, Any], path: str | Path = "config.yaml") -> Confi
         else:
             agent_data[key] = new_content
 
+    # debug 段：前端不发送，保留旧值
+    debug_data = data.get("debug", {})
+    if not debug_data and "debug" in old_raw:
+        debug_data = old_raw["debug"] or {}
+
     out = {
         "api": data.get("api", {}),
         "agent": agent_data,
-        "debug": data.get("debug", {}),
+        "debug": debug_data,
     }
 
     with open(path, "w", encoding="utf-8") as f:

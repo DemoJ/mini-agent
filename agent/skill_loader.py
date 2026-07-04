@@ -56,7 +56,8 @@ class SkillInfo:
 
     def index_line(self) -> str:
         """生成注入 system prompt 的索引行"""
-        trig = f"  触发词: {', '.join(self.triggers)}" if self.triggers else ""
+        # 防御：triggers 中可能混入非 str 元素，统一转 str
+        trig = f"  触发词: {', '.join(str(t) for t in self.triggers)}" if self.triggers else ""
         return f"- {self.name}: {self.description}{trig}"
 
 
