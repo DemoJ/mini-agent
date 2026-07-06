@@ -309,6 +309,22 @@ class Agent:
         )
         self._refresh_openai_tools()
 
+    def _reload_config_and_refresh_skills(self) -> None:
+        """重新加载 config.yaml 并刷新 skills 索引。
+
+        在每次对话开始时调用，确保运行期间对配置的修改（如新增 skills 目录）
+        和 skills 目录内容的变化（如手动放入新 skill）能被实时感知，
+        无需重启 Agent。
+        """
+        try:
+            load_config(self._cfg.path)
+            cfg = get_config()
+            self._cfg = cfg
+        except Exception:
+            # 配置加载失败时保持现状，不阻断对话
+            return
+        self._refresh_skills_after_change()
+
     # --------------------------------------------------------
     # 工具描述 / skill 索引（注入 system prompt）
     # --------------------------------------------------------
@@ -756,6 +772,9 @@ class Agent:
         同 chat()，但额外返回过程步骤（思考内容 + 工具调用）。
         返回 dict: { "reply": str|None, "steps": list[dict], "error": str|None }
         """
+        # 每次对话开始时重新加载配置并刷新 skills 索引，
+        # 确保运行期间新增的 skills 目录或 skill 文件能被实时感知
+        self._reload_config_and_refresh_skills()
         self._stop_event.clear()
         self._generation += 1
         my_gen = self._generation
@@ -865,6 +884,9 @@ class Agent:
         支持停止：request_stop() 置位 _stop_event 后，在检查点退出并清理消息历史。
         request_stop() 还会 close 当前 LLM stream，中断阻塞的 chunk 读取。
         """
+        # 每次对话开始时重新加载配置并刷新 skills 索引，
+        # 确保运行期间新增的 skills 目录或 skill 文件能被实时感知
+        self._reload_config_and_refresh_skills()
         self._stop_event.clear()
         self._generation += 1
         my_gen = self._generation
