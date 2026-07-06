@@ -17,6 +17,34 @@ from pathlib import Path
 from typing import Any
 
 
+# ============================================================
+# 图片检测工具
+# ============================================================
+
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff'}
+IMAGE_MIME = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.bmp': 'image/bmp',
+    '.tiff': 'image/tiff',
+}
+
+
+def is_image_file(filename: str) -> bool:
+    """判断文件名是否为支持的图片格式。"""
+    ext = Path(filename).suffix.lower()
+    return ext in IMAGE_EXTENSIONS
+
+
+def get_image_mime(filename: str) -> str:
+    """根据文件名获取图片的 MIME 类型，默认 image/jpeg。"""
+    ext = Path(filename).suffix.lower()
+    return IMAGE_MIME.get(ext, 'image/jpeg')
+
+
 class FileManager:
     """文件存储与注册表管理。"""
 
@@ -48,6 +76,7 @@ class FileManager:
             "stored_path": str(stored_path),
             "size": size,
             "type": "upload",
+            "is_image": is_image_file(filename),
         }
         self._registry[file_id] = info
         return info

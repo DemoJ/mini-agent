@@ -112,6 +112,15 @@
                     <label for="cfg-model">Model</label>
                     <input type="text" id="cfg-model" autocomplete="off" placeholder="gpt-4o">
                 </div>
+                <div class="field">
+                    <label>视觉能力（Vision）</label>
+                    <label class="toggle-row">
+                        <input type="checkbox" id="cfg-vision">
+                        <span class="toggle-switch"><span class="toggle-slider"></span></span>
+                        <span class="toggle-label">模型支持图片识别（多模态）</span>
+                    </label>
+                    <span class="field-hint">开启后用户上传的图片会以 base64 直接传给模型；关闭则仅传文件路径</span>
+                </div>
             </section>
 
             <section class="settings-section">

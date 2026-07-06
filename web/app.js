@@ -68,6 +68,7 @@ async function onFileSelected(event) {
             const data = await resp.json();
             if (data.ok) {
                 item.file_id = data.file_id;
+                item.is_image = data.is_image || false;
                 item.status = 'done';
             } else {
                 item.status = 'error';
@@ -98,15 +99,20 @@ function renderFileChips() {
         let icon = '';
         let label = item.file.name;
         let badge = '';
+        let thumb = '';
         if (item.status === 'uploading') {
             badge = '<span class="file-chip-badge">上传中…</span>';
         } else if (item.status === 'done') {
             badge = `<span class="file-chip-badge done">${sizeStr}</span>`;
+            if (item.is_image) {
+                thumb = `<img class="file-chip-thumb" src="/api/files/${item.file_id}" alt="">`;
+            }
         } else if (item.status === 'error') {
             badge = `<span class="file-chip-badge error">${escapeHtml(item.error || '失败')}</span>`;
         }
+        const fileIcon = thumb || '<svg class="file-chip-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
         chip.innerHTML = `
-            <svg class="file-chip-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            ${fileIcon}
             <span class="file-chip-name">${escapeHtml(label)}</span>
             ${badge}
             <button class="file-chip-remove" onclick="removeFile(${i})" title="移除">
@@ -158,7 +164,7 @@ async function sendChat() {
     // 收集文件信息用于展示
     const attachedFiles = pendingFiles
         .filter(f => f.status === 'done' && f.file_id)
-        .map(f => ({ name: f.file.name, size: f.file.size, file_id: f.file_id }));
+        .map(f => ({ name: f.file.name, size: f.file.size, file_id: f.file_id, is_image: f.is_image }));
     // 清空待发文件
     pendingFiles = [];
     renderFileChips();
@@ -507,12 +513,19 @@ function appendUserMessage(text, files) {
     if (files && files.length > 0) {
         filesHtml = '<div class="msg-attachments">';
         for (const f of files) {
-            filesHtml += `
+            if (f.is_image) {
+                filesHtml += `
+                <div class="msg-attachment msg-attachment-image">
+                    <img class="msg-image-preview" src="/api/files/${encodeURIComponent(f.file_id)}" alt="${escapeHtml(f.name)}" onclick="previewImage(this.src)" loading="lazy">
+                </div>`;
+            } else {
+                filesHtml += `
                 <div class="msg-attachment">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                     <span class="msg-attachment-name">${escapeHtml(f.name)}</span>
                     <span class="msg-attachment-size">${formatFileSize(f.size)}</span>
                 </div>`;
+            }
         }
         filesHtml += '</div>';
     }
@@ -549,26 +562,48 @@ function appendFileCard(evt) {
     row.className = 'msg-row agent';
     const sizeStr = formatFileSize(evt.size || 0);
     const desc = evt.description ? `<div class="file-card-desc">${escapeHtml(evt.description)}</div>` : '';
-    row.innerHTML =
-        `<div class="msg-avatar">
+    const fileUrl = `/api/files/${encodeURIComponent(evt.file_id)}`;
+    const avatar = `<div class="msg-avatar">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>
-        </div>
-         <div class="msg-bubble-wrap">
-            <div class="msg-name">mini-agent</div>
-            <a class="file-card" href="/api/files/${encodeURIComponent(evt.file_id)}" download="${escapeHtml(evt.filename)}">
-                <div class="file-card-icon">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
+        </div>`;
+
+    if (evt.is_image) {
+        // 图片：显示预览图 + 下载链接
+        row.innerHTML =
+            `${avatar}
+             <div class="msg-bubble-wrap">
+                <div class="msg-name">mini-agent</div>
+                <div class="file-card file-card-image">
+                    <img class="msg-image-large" src="${fileUrl}" alt="${escapeHtml(evt.filename)}" onclick="previewImage(this.src)" loading="lazy">
+                    <div class="file-card-info">
+                        ${desc}
+                        <div class="file-card-meta">
+                            <a href="${fileUrl}" download="${escapeHtml(evt.filename)}">${escapeHtml(evt.filename)} · ${sizeStr} · 点击下载</a>
+                        </div>
+                    </div>
                 </div>
-                <div class="file-card-info">
-                    <div class="file-card-name">${escapeHtml(evt.filename)}</div>
-                    ${desc}
-                    <div class="file-card-meta">${sizeStr} · 点击下载</div>
-                </div>
-                <div class="file-card-download">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                </div>
-            </a>
-         </div>`;
+             </div>`;
+    } else {
+        // 非图片：保持原有下载卡片样式
+        row.innerHTML =
+            `${avatar}
+             <div class="msg-bubble-wrap">
+                <div class="msg-name">mini-agent</div>
+                <a class="file-card" href="${fileUrl}" download="${escapeHtml(evt.filename)}">
+                    <div class="file-card-icon">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
+                    </div>
+                    <div class="file-card-info">
+                        <div class="file-card-name">${escapeHtml(evt.filename)}</div>
+                        ${desc}
+                        <div class="file-card-meta">${sizeStr} · 点击下载</div>
+                    </div>
+                    <div class="file-card-download">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    </div>
+                </a>
+             </div>`;
+    }
     messagesEl().appendChild(row);
     scrollToBottom();
 }
@@ -684,6 +719,7 @@ async function loadSettings() {
         $('cfg-base-url').value = cfg.api?.base_url || '';
         $('cfg-api-key').value = cfg.api?.api_key || '';
         $('cfg-model').value = cfg.api?.model || '';
+        $('cfg-vision').checked = cfg.api?.vision || false;
         $('cfg-max-steps').value = cfg.agent?.max_steps ?? '';
         $('cfg-temperature').value = cfg.agent?.temperature ?? '';
         $('cfg-max-tokens').value = cfg.agent?.max_tokens ?? '';
@@ -714,6 +750,7 @@ async function saveSettings(event) {
             base_url: $('cfg-base-url').value.trim(),
             api_key: $('cfg-api-key').value,
             model: $('cfg-model').value.trim(),
+            vision: $('cfg-vision').checked,
         },
         agent: {
             max_steps: parseInt($('cfg-max-steps').value, 10) || 10,
@@ -766,6 +803,36 @@ function showToast(msg, type) {
     toast.className = 'toast ' + type;
     toast.hidden = false;
     setTimeout(() => { toast.hidden = true; }, 2500);
+}
+
+// ------------------------------------------------------------
+// 图片大图预览（Lightbox）
+// ------------------------------------------------------------
+let _lightboxEl = null;
+
+function previewImage(src) {
+    if (!_lightboxEl) {
+        _lightboxEl = document.createElement('div');
+        _lightboxEl.className = 'image-lightbox';
+        _lightboxEl.innerHTML = '<img class="lightbox-img" alt="">';
+        _lightboxEl.addEventListener('click', closeLightbox);
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && _lightboxEl && !_lightboxEl.hidden) closeLightbox();
+        });
+        document.body.appendChild(_lightboxEl);
+    }
+    const img = _lightboxEl.querySelector('.lightbox-img');
+    img.src = src;
+    _lightboxEl.hidden = false;
+    document.body.style.overflow = 'hidden';
+}
+
+function closeLightbox() {
+    if (!_lightboxEl) return;
+    _lightboxEl.hidden = true;
+    const img = _lightboxEl.querySelector('.lightbox-img');
+    if (img) img.src = '';
+    document.body.style.overflow = '';
 }
 
 // ------------------------------------------------------------

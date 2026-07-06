@@ -34,12 +34,16 @@ class APIConfig:
         self.base_url: str = cfg.get("base_url", "https://api.openai.com/v1")
         self.api_key: str = cfg.get("api_key", "")
         self.model: str = cfg.get("model", "gpt-4o")
+        # 模型是否支持视觉能力（多模态）。开启后用户上传的图片会以 base64 发送给模型；
+        # 关闭则仅传文件路径文本，模型无法直接"看到"图片。
+        self.vision: bool = cfg.get("vision", False)
 
     def to_dict(self, mask_key: bool = False) -> dict[str, Any]:
         return {
             "base_url": self.base_url,
             "api_key": _mask_api_key(self.api_key) if mask_key else self.api_key,
             "model": self.model,
+            "vision": self.vision,
         }
 
 

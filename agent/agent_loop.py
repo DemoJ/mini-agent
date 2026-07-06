@@ -35,6 +35,7 @@ from agent.skill_loader import (
     load_skill_full,
     make_read_file_tool,
 )
+from agent.file_manager import is_image_file
 from agent.tools.builtin import _decode_output
 from agent.skill_manager import (
     SkillManageError,
@@ -750,7 +751,7 @@ class Agent:
         result = self.chat_with_steps(user_input)
         return result["reply"]
 
-    def chat_with_steps(self, user_input: str) -> dict:
+    def chat_with_steps(self, user_input: str | list) -> dict:
         """
         同 chat()，但额外返回过程步骤（思考内容 + 工具调用）。
         返回 dict: { "reply": str|None, "steps": list[dict], "error": str|None }
@@ -849,7 +850,7 @@ class Agent:
 
         return {"reply": None, "steps": steps, "error": "达到内部步数上限"}
 
-    def chat_stream(self, user_input: str):
+    def chat_stream(self, user_input: str | list):
         """
         流式版本：生成器逐片 yield 事件字典。
 
@@ -1019,6 +1020,7 @@ class Agent:
                                     "filename": file_obj["filename"],
                                     "size": file_obj["size"],
                                     "description": file_obj.get("description", ""),
+                                    "is_image": is_image_file(file_obj["filename"]),
                                 }
                         except (json.JSONDecodeError, KeyError):
                             pass

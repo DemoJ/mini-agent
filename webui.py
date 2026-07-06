@@ -10,6 +10,7 @@ mini-agent WebUI 入口
 """
 
 import argparse
+import base64
 import json
 import threading
 from pathlib import Path
@@ -22,7 +23,7 @@ from pydantic import BaseModel
 
 from agent.agent_loop import Agent
 from agent.config_loader import get_config, load_config, save_config
-from agent.file_manager import get_file_manager, init_file_manager
+from agent.file_manager import get_file_manager, init_file_manager, is_image_file, get_image_mime
 from agent.skill_manager import (
     SkillManageError,
     delete_skill,
@@ -76,24 +77,71 @@ def _force_release_busy() -> None:
         _busy = False
 
 
-def _build_message_with_files(text: str, file_ids: list[str]) -> str:
-    """将上传文件信息追加到用户消息文本中，让 Agent 知道文件路径。"""
+def _build_message_with_files(text: str, file_ids: list[str]) -> str | list:
+    """构建用户消息，图片以多模态格式发送给模型。
+
+    - vision 开启 + 图片文件：读取内容转 base64，以 image_url 格式发送给模型
+    - vision 关闭 + 图片文件：仅传文件路径文本，模型无法直接看到图片
+    - 非图片文件：始终保持原有文本路径格式
+    - 无图片时返回纯文本字符串；有图片且 vision 开启时返回多模态 content 列表
+    """
     if not file_ids:
         return text
     try:
         fm = get_file_manager()
     except RuntimeError:
         return text
-    file_lines = []
+
+    # 读取配置中的 vision 开关
+    try:
+        cfg = get_config()
+        vision_enabled = cfg.api.vision
+    except Exception:
+        vision_enabled = False
+
+    image_parts: list[dict] = []
+    file_lines: list[str] = []
+
     for fid in file_ids:
         info = fm.get_file(fid)
-        if info:
-            file_lines.append(
-                f"- {info['filename']} (路径: {info['stored_path']}, 大小: {info['size']} 字节)"
-            )
-    if not file_lines:
+        if not info:
+            continue
+        filename = info["filename"]
+        stored_path = Path(info["stored_path"])
+
+        if is_image_file(filename) and stored_path.exists():
+            if vision_enabled:
+                try:
+                    with open(stored_path, "rb") as f:
+                        img_data = base64.b64encode(f.read()).decode("utf-8")
+                    mime = get_image_mime(filename)
+                    image_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{img_data}"},
+                    })
+                    file_lines.append(f"- {filename} (图片，已直接传给模型)")
+                except Exception:
+                    file_lines.append(f"- {filename} (路径: {info['stored_path']}, 大小: {info['size']} 字节)")
+            else:
+                file_lines.append(f"- {filename} (图片，当前模型不支持视觉能力，无法直接查看图片内容。路径: {info['stored_path']}, 大小: {info['size']} 字节)")
+        else:
+            file_lines.append(f"- {filename} (路径: {info['stored_path']}, 大小: {info['size']} 字节)")
+
+    if not file_lines and not image_parts:
         return text
-    return text + "\n\n[用户上传的文件]\n" + "\n".join(file_lines)
+
+    # 没有图片（或 vision 关闭）→ 返回纯文本
+    if not image_parts:
+        return text + "\n\n[用户上传的文件]\n" + "\n".join(file_lines)
+
+    # 有图片且 vision 开启 → 返回多模态 content 列表
+    content_parts: list[dict] = []
+    full_text = text
+    if file_lines:
+        full_text += "\n\n[用户上传的文件]\n" + "\n".join(file_lines)
+    content_parts.append({"type": "text", "text": full_text})
+    content_parts.extend(image_parts)
+    return content_parts
 
 
 def get_agent() -> Agent:
@@ -354,6 +402,7 @@ async def api_upload(file: UploadFile = File(...)):
             "file_id": info["file_id"],
             "filename": info["filename"],
             "size": info["size"],
+            "is_image": is_image_file(info["filename"]),
         }
     except Exception as e:
         return JSONResponse(
@@ -375,10 +424,14 @@ def api_download_file(file_id: str):
     stored_path = Path(info["stored_path"])
     if not stored_path.exists():
         raise HTTPException(status_code=404, detail="文件已被删除")
+    # 图片文件设置正确的 MIME 类型，使浏览器能内联显示
+    media_type = "application/octet-stream"
+    if is_image_file(info["filename"]):
+        media_type = get_image_mime(info["filename"])
     return FileResponse(
         str(stored_path),
         filename=info["filename"],
-        media_type="application/octet-stream",
+        media_type=media_type,
     )
 
 

@@ -8,6 +8,7 @@ api:
   base_url: "https://api.openai.com/v1"   # API 端点
   api_key: "YOUR_API_KEY_HERE"            # API Key（必填）
   model: "gpt-4o"                         # 模型名称
+  vision: true                            # 模型是否支持视觉能力（多模态）。开启后图片以 base64 发送给模型
 
 # ============================================================
 # Agent 行为配置
