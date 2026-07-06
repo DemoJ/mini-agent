@@ -7,6 +7,7 @@ const messagesEl = () => $('messages');
 let sending = false;
 let stopped = false;                    // 用户主动停止标志
 let currentAbortController = null;      // 当前流式请求的 AbortController
+let pendingFiles = [];                  // 待上传的文件列表 [{file, file_id?, status: 'pending'|'uploading'|'done'|'error'}]
 
 // 发送 / 停止按钮图标
 const SEND_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
@@ -41,11 +42,106 @@ function useExample(btn) {
     input.focus();
 }
 
+// ------------------------------------------------------------
+// 文件上传
+// ------------------------------------------------------------
+function onAttachClick() {
+    $('file-input').click();
+}
+
+async function onFileSelected(event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';  // 清空，允许重复选同一文件
+    for (const file of files) {
+        pendingFiles.push({ file, status: 'pending' });
+    }
+    renderFileChips();
+    // 逐个上传
+    for (const item of pendingFiles) {
+        if (item.status !== 'pending') continue;
+        item.status = 'uploading';
+        renderFileChips();
+        try {
+            const formData = new FormData();
+            formData.append('file', item.file);
+            const resp = await fetch('/api/upload', { method: 'POST', body: formData });
+            const data = await resp.json();
+            if (data.ok) {
+                item.file_id = data.file_id;
+                item.status = 'done';
+            } else {
+                item.status = 'error';
+                item.error = data.error || '上传失败';
+            }
+        } catch (e) {
+            item.status = 'error';
+            item.error = e.message;
+        }
+        renderFileChips();
+    }
+    updateSendBtn();
+}
+
+function removeFile(index) {
+    pendingFiles.splice(index, 1);
+    renderFileChips();
+    updateSendBtn();
+}
+
+function renderFileChips() {
+    const container = $('file-chips');
+    container.innerHTML = '';
+    pendingFiles.forEach((item, i) => {
+        const chip = document.createElement('div');
+        chip.className = 'file-chip ' + item.status;
+        const sizeStr = formatFileSize(item.file.size);
+        let icon = '';
+        let label = item.file.name;
+        let badge = '';
+        if (item.status === 'uploading') {
+            badge = '<span class="file-chip-badge">上传中…</span>';
+        } else if (item.status === 'done') {
+            badge = `<span class="file-chip-badge done">${sizeStr}</span>`;
+        } else if (item.status === 'error') {
+            badge = `<span class="file-chip-badge error">${escapeHtml(item.error || '失败')}</span>`;
+        }
+        chip.innerHTML = `
+            <svg class="file-chip-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            <span class="file-chip-name">${escapeHtml(label)}</span>
+            ${badge}
+            <button class="file-chip-remove" onclick="removeFile(${i})" title="移除">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>`;
+        container.appendChild(chip);
+    });
+}
+
+function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function getUploadedFileIds() {
+    return pendingFiles.filter(f => f.status === 'done' && f.file_id).map(f => f.file_id);
+}
+
+function allFilesUploaded() {
+    return pendingFiles.every(f => f.status === 'done' || f.status === 'error');
+}
+
 async function sendChat() {
     if (sending) return;
     const input = $('chat-input');
     const text = input.value.trim();
-    if (!text) return;
+    // 有文本或有已上传文件均可发送
+    const fileIds = getUploadedFileIds();
+    if (!text && fileIds.length === 0) return;
+    // 等待所有文件上传完成
+    if (!allFilesUploaded()) {
+        showError('文件正在上传中，请稍候…');
+        return;
+    }
 
     sending = true;
     stopped = false;
@@ -59,7 +155,15 @@ async function sendChat() {
     const welcome = messagesEl().querySelector('.welcome');
     if (welcome) welcome.remove();
 
-    appendUserMessage(text);
+    // 收集文件信息用于展示
+    const attachedFiles = pendingFiles
+        .filter(f => f.status === 'done' && f.file_id)
+        .map(f => ({ name: f.file.name, size: f.file.size, file_id: f.file_id }));
+    // 清空待发文件
+    pendingFiles = [];
+    renderFileChips();
+
+    appendUserMessage(text, attachedFiles);
     setStatus('思考中', true);
     hideError();
 
@@ -78,7 +182,7 @@ async function sendChat() {
         const resp = await fetch('/api/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: text }),
+            body: JSON.stringify({ message: text, file_ids: fileIds }),
             signal: currentAbortController.signal,
         });
 
@@ -205,6 +309,11 @@ function handleStreamEvent(evt, ctx) {
             break;
         case 'tool_result':
             appendToolResult(evt.id, evt.result);
+            break;
+        case 'file':
+            finalizeReasoning(ctx);
+            finalizeReply(ctx);
+            appendFileCard(evt);
             break;
         case 'done':
             finalizeReasoning(ctx);
@@ -373,29 +482,47 @@ function formatResultCompact(result) {
 function setSending(v) {
     const btn = $('send-btn');
     const input = $('chat-input');
+    const attachBtn = $('attach-btn');
     if (v) {
         // 发送中：按钮变停止按钮（不禁用，可点击停止）
         btn.innerHTML = STOP_ICON;
         btn.classList.add('stop-mode');
         btn.disabled = false;
         input.disabled = true;
+        if (attachBtn) attachBtn.disabled = true;
     } else {
         // 空闲：恢复发送按钮
         btn.innerHTML = SEND_ICON;
         btn.classList.remove('stop-mode');
         input.disabled = false;
+        if (attachBtn) attachBtn.disabled = false;
         updateSendBtn();
     }
 }
 
-function appendUserMessage(text) {
+function appendUserMessage(text, files) {
     const row = document.createElement('div');
     row.className = 'msg-row user';
+    let filesHtml = '';
+    if (files && files.length > 0) {
+        filesHtml = '<div class="msg-attachments">';
+        for (const f of files) {
+            filesHtml += `
+                <div class="msg-attachment">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    <span class="msg-attachment-name">${escapeHtml(f.name)}</span>
+                    <span class="msg-attachment-size">${formatFileSize(f.size)}</span>
+                </div>`;
+        }
+        filesHtml += '</div>';
+    }
+    const textHtml = text ? `<div class="msg-bubble">${escapeHtml(text)}</div>` : '';
     row.innerHTML =
         `<div class="msg-avatar">你</div>
          <div class="msg-bubble-wrap">
             <div class="msg-name">你</div>
-            <div class="msg-bubble">${escapeHtml(text)}</div>
+            ${textHtml}
+            ${filesHtml}
          </div>`;
     messagesEl().appendChild(row);
     scrollToBottom();
@@ -413,6 +540,35 @@ function appendAgentMessage(text) {
             <div class="msg-bubble markdown-body">${renderMarkdown(text)}</div>
          </div>`;
     highlightCode(row.querySelector('.msg-bubble'));
+    messagesEl().appendChild(row);
+    scrollToBottom();
+}
+
+function appendFileCard(evt) {
+    const row = document.createElement('div');
+    row.className = 'msg-row agent';
+    const sizeStr = formatFileSize(evt.size || 0);
+    const desc = evt.description ? `<div class="file-card-desc">${escapeHtml(evt.description)}</div>` : '';
+    row.innerHTML =
+        `<div class="msg-avatar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>
+        </div>
+         <div class="msg-bubble-wrap">
+            <div class="msg-name">mini-agent</div>
+            <a class="file-card" href="/api/files/${encodeURIComponent(evt.file_id)}" download="${escapeHtml(evt.filename)}">
+                <div class="file-card-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><polyline points="9 15 12 12 15 15"/></svg>
+                </div>
+                <div class="file-card-info">
+                    <div class="file-card-name">${escapeHtml(evt.filename)}</div>
+                    ${desc}
+                    <div class="file-card-meta">${sizeStr} · 点击下载</div>
+                </div>
+                <div class="file-card-download">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                </div>
+            </a>
+         </div>`;
     messagesEl().appendChild(row);
     scrollToBottom();
 }
@@ -534,6 +690,9 @@ async function loadSettings() {
         $('cfg-reasoning-effort').value = cfg.agent?.reasoning_effort || 'none';
         $('cfg-system-prompt').value = cfg.agent?.system_prompt || '';
         $('cfg-user-prompt').value = cfg.agent?.user_prompt || '';
+        // skills_dir：后端返回列表，前端用多行文本展示（每行一个目录）
+        const sdList = cfg.agent?.skills_dir;
+        $('cfg-skills-dir').value = Array.isArray(sdList) ? sdList.join('\n') : (sdList || '');
         // 提示词存储位置提示：文件引用模式显示来源文件，内联模式提示将存入 config.yaml
         setPromptHint('cfg-system-prompt-hint', cfg.agent?.system_prompt_file);
         setPromptHint('cfg-user-prompt-hint', cfg.agent?.user_prompt_file);
@@ -563,6 +722,8 @@ async function saveSettings(event) {
             reasoning_effort: $('cfg-reasoning-effort').value,
             system_prompt: $('cfg-system-prompt').value,
             user_prompt: $('cfg-user-prompt').value,
+            // skills_dir：前端多行文本 → 列表（去空行、去首尾空白）
+            skills_dir: $('cfg-skills-dir').value.split('\n').map(s => s.trim()).filter(Boolean),
         },
     };
     try {
@@ -667,7 +828,9 @@ function updateSendBtn() {
     // 发送中按钮状态由 setSending 管理，不干预
     if (sending) return;
     const input = $('chat-input');
-    $('send-btn').disabled = !input.value.trim();
+    const hasText = input.value.trim().length > 0;
+    const hasFiles = getUploadedFileIds().length > 0;
+    $('send-btn').disabled = !hasText && !hasFiles;
 }
 
 // ------------------------------------------------------------

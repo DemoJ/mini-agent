@@ -31,3 +31,7 @@ config.yaml
 .claude/
 .workbuddy/
 skills/
+
+# 文件上传/输出目录
+uploads/
+outputs/

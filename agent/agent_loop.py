@@ -28,12 +28,14 @@ from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 from agent.config_loader import Config, get_config, load_config
+from agent.file_manager import get_file_manager, init_file_manager
 from agent.skill_loader import (
     SkillInfo,
     discover_skills,
     load_skill_full,
     make_read_file_tool,
 )
+from agent.tools.builtin import _decode_output
 from agent.skill_manager import (
     SkillManageError,
     delete_skill as _sm_delete_skill,
@@ -71,6 +73,9 @@ class Agent:
         cfg = get_config()
         self._cfg: Config = cfg
 
+        # 初始化文件管理器（上传/交付目录基于配置文件父目录）
+        init_file_manager(cfg.path.parent)
+
         self.client = OpenAI(
             base_url=cfg.api.base_url,
             api_key=cfg.api.api_key,
@@ -96,7 +101,7 @@ class Agent:
         # ---- Skill 注册表 ----
         # L1 索引：所有已发现的 skill 元数据（常驻）
         self.skills_registry: dict[str, SkillInfo] = discover_skills(
-            cfg.agent.skills_dir
+            cfg.agent.skills_dirs
         )
         # 已完整加载（L2）的 skill 名集合，用于幂等去重
         self._loaded_skills: set[str] = set()
@@ -289,7 +294,7 @@ class Agent:
     def _refresh_skills_after_change(self) -> None:
         """skill 增删改后调用：重扫 skills 目录、刷新索引与 system prompt、刷新 tools。"""
         cfg = self._cfg
-        self.skills_registry = discover_skills(cfg.agent.skills_dir)
+        self.skills_registry = discover_skills(cfg.agent.skills_dirs)
         # 删除已不存在的 skill 的已加载标记
         self._loaded_skills = {
             n for n in self._loaded_skills if n in self.skills_registry
@@ -338,6 +343,11 @@ class Agent:
         # 需要访问 self 状态的工具特殊处理
         if tool_name == "bash":
             return self._do_bash(args.get("command", ""))
+        if tool_name == "deliver_file":
+            return self._do_deliver_file(
+                args.get("path", ""),
+                args.get("description", ""),
+            )
         if tool_name == "load_skill":
             return self._do_load_skill(args.get("name", ""))
         if tool_name == "list_skills":
@@ -416,7 +426,6 @@ class Agent:
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
             )
         except Exception as e:
             return json.dumps(
@@ -452,8 +461,8 @@ class Agent:
                         {
                             "success": ret == 0,
                             "exit_code": ret,
-                            "stdout": stdout,
-                            "stderr": stderr,
+                            "stdout": _decode_output(stdout),
+                            "stderr": _decode_output(stderr),
                         },
                         ensure_ascii=False,
                     )
@@ -477,6 +486,12 @@ class Agent:
         finally:
             with self._proc_lock:
                 self._current_proc = None
+
+    def _do_deliver_file(self, path: str, description: str = "") -> str:
+        """执行文件交付：将文件复制到 outputs/ 目录并注册，返回 JSON 结果字符串。"""
+        fm = get_file_manager()
+        result = fm.deliver_file(path, description=description)
+        return json.dumps(result, ensure_ascii=False)
 
     def _cleanup_interrupted_messages(self, my_gen: int = -1) -> None:
         """停止后清理消息历史，确保一致性。
@@ -791,6 +806,21 @@ class Agent:
                         })
                         return {"reply": summary, "steps": steps, "error": None}
 
+                    # deliver_file → 交付文件给用户（不结束对话，继续执行）
+                    if tc.function.name == "deliver_file":
+                        result_str = self._do_deliver_file(
+                            tool_args.get("path", ""),
+                            tool_args.get("description", ""),
+                        )
+                        steps.append({
+                            "type": "file",
+                            "name": "deliver_file",
+                            "args": tool_args,
+                            "result": result_str,
+                        })
+                        tool_results.append((tc, result_str))
+                        continue
+
                     # 普通工具（含 load_skill）→ 执行并暂存结果
                     result_str = self._execute_tool_call(tc.function.name, tool_args)
                     steps.append({
@@ -828,6 +858,7 @@ class Agent:
         - {"type": "reply_delta", "content": str}      回复正文增量（含中间说明）
         - {"type": "tool_call", "id": str, "name": str, "args": dict}   工具调用（参数完整后发出）
         - {"type": "tool_result", "id": str, "name": str, "result": str} 工具执行结果
+        - {"type": "file", "file_id": str, "filename": str, "size": int, "description": str}  文件交付
         - {"type": "done", "error": str | None, "reply": str | None}    结束
 
         支持停止：request_stop() 置位 _stop_event 后，在检查点退出并清理消息历史。
@@ -964,6 +995,34 @@ class Agent:
                             yield {"type": "reply_delta", "content": summary}
                         yield {"type": "done", "error": None, "reply": None}
                         return
+
+                    # deliver_file → 交付文件给用户（不结束对话，继续执行）
+                    if tc["name"] == "deliver_file":
+                        yield {"type": "tool_call", "id": tc["id"], "name": tc["name"], "args": tool_args}
+                        result_str = self._do_deliver_file(
+                            tool_args.get("path", ""),
+                            tool_args.get("description", ""),
+                        )
+                        self.messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "content": result_str,
+                        })
+                        yield {"type": "tool_result", "id": tc["id"], "name": tc["name"], "result": result_str}
+                        # 解析结果，成功则发出 file 事件供前端渲染下载卡片
+                        try:
+                            file_obj = json.loads(result_str)
+                            if file_obj.get("ok"):
+                                yield {
+                                    "type": "file",
+                                    "file_id": file_obj["file_id"],
+                                    "filename": file_obj["filename"],
+                                    "size": file_obj["size"],
+                                    "description": file_obj.get("description", ""),
+                                }
+                        except (json.JSONDecodeError, KeyError):
+                            pass
+                        continue
 
                     # 普通工具（含 load_skill）→ 执行
                     yield {"type": "tool_call", "id": tc["id"], "name": tc["name"], "args": tool_args}

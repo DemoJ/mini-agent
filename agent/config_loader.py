@@ -65,10 +65,18 @@ class AgentConfig:
         self.user_prompt, self.user_prompt_file = self._resolve_prompt(
             cfg, "user_prompt", base_dir
         )
-        # Skill 目录路径（相对于配置文件父目录或绝对路径）
+        # Skill 目录路径列表（支持多目录；配置可写单字符串或列表，统一存为 list[Path]）
+        # 靠前的目录优先级更高：同名 skill 由先扫描到的目录提供
         skills_dir_raw = cfg.get("skills_dir", "skills")
-        skills_dir_path = (base_dir / skills_dir_raw) if not Path(skills_dir_raw).is_absolute() else Path(skills_dir_raw)
-        self.skills_dir: Path = skills_dir_path
+        if isinstance(skills_dir_raw, (list, tuple)):
+            raw_list = [str(x) for x in skills_dir_raw if str(x).strip()]
+        else:
+            raw_list = [str(skills_dir_raw)] if str(skills_dir_raw).strip() else []
+        if not raw_list:
+            raw_list = ["skills"]
+        self.skills_dirs: list[Path] = [
+            Path(p) if Path(p).is_absolute() else (base_dir / p) for p in raw_list
+        ]
 
     @staticmethod
     def _resolve_prompt(cfg: dict[str, Any], key: str, base_dir: Path) -> tuple[str, Path | None]:
@@ -105,7 +113,7 @@ class AgentConfig:
             "user_prompt": self.user_prompt,
             "system_prompt_file": self._file_rel(self.system_prompt_file) if self.system_prompt_file else None,
             "user_prompt_file": self._file_rel(self.user_prompt_file) if self.user_prompt_file else None,
-            "skills_dir": str(self.skills_dir),
+            "skills_dir": [self._file_rel(d) for d in self.skills_dirs],
         }
 
 
@@ -195,8 +203,8 @@ def save_config(data: dict[str, Any], path: str | Path = "config.yaml") -> Confi
 
     reasoning_effort 为 "none" 时写为 null。
 
-    保留字段：前端只发送 api / agent 两段，debug 段和 agent.skills_dir
-    不在表单中，写盘时从旧配置继承，避免保存后丢失。
+    保留字段：前端只发送 api / agent 两段，debug 段不在表单中，写盘时从旧配置继承，避免保存后丢失。
+    skills_dir 已纳入设置页表单（多目录，前端发送列表）；单目录写标量、多目录写列表。
     """
     path = Path(path)
     base_dir = path.parent
@@ -215,9 +223,21 @@ def save_config(data: dict[str, Any], path: str | Path = "config.yaml") -> Confi
     agent_data.pop("system_prompt_file", None)
     agent_data.pop("user_prompt_file", None)
 
-    # 前端不发送 skills_dir，保留旧值
-    if "skills_dir" not in agent_data and "skills_dir" in old_agent_raw:
-        agent_data["skills_dir"] = old_agent_raw["skills_dir"]
+    # skills_dir：前端发送列表（多目录）或字符串；统一规范化
+    # 单目录写为标量保持 config.yaml 简洁，多目录写为列表
+    sd = agent_data.get("skills_dir")
+    if sd is None:
+        # 前端未发送，保留旧值
+        sd = old_agent_raw.get("skills_dir", "skills")
+    if isinstance(sd, str):
+        # 兼容前端误传多行字符串：按换行拆分
+        parts = [s.strip() for s in sd.split("\n") if s.strip()]
+        sd_list = parts if parts else ["skills"]
+    elif isinstance(sd, (list, tuple)):
+        sd_list = [str(s).strip() for s in sd if str(s).strip()] or ["skills"]
+    else:
+        sd_list = ["skills"]
+    agent_data["skills_dir"] = sd_list[0] if len(sd_list) == 1 else sd_list
 
     # 规范化 reasoning_effort：none → null
     re = agent_data.get("reasoning_effort", "none")

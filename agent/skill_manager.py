@@ -2,19 +2,21 @@
 Skill 管理器 - 安装 / 更新 / 删除 / 列表 / 详情
 ================================================
 
-所有操作都基于 git，目标目录是 config.agent.skills_dir（默认 skills/）。
+所有操作都基于 git，目标目录来自 config.agent.skills_dirs（多目录，默认 ["skills"]）。
 
 设计要点：
-- install：git clone <url> 到 <skills_dir>/<name>/，目录名做严格校验
-- update：在 <skills_dir>/<name>/ 执行 git fetch + git reset --hard origin/@{upstream}
+- install：git clone <url> 到 <target_skills_dir>/<name>/，目录名做严格校验；
+           target_dir 可指定装到哪个已配置目录，默认装到第一个（主）目录
+- update：在 skill 所在目录执行 git fetch + git reset --hard origin/@{upstream}
           （未设 upstream 时退化为 git pull --ff-only）
 - delete：shutil.rmtree 删除目录，删除前确认是 git 仓库或至少含 SKILL.md
-- list / info：复用 skill_loader.discover_skills() 的 L1 索引
+- list / info：复用 skill_loader.discover_skills() 的 L1 索引（跨所有目录扫描）
 
 安全：
 - 目录名只允许 [a-zA-Z0-9_-]，禁止 . / \\ 等字符，杜绝路径穿越
 - 所有 git 子进程显式传入 cwd，不依赖 shell
-- 删除前二次确认目标在 skills_dir 内
+- 删除前二次确认目标在某个 skills_dir 内
+- install 的 target_dir 必须是已配置的 skills 目录之一（防穿越）
 """
 
 from __future__ import annotations
@@ -58,18 +60,49 @@ def _validate_name(name: str) -> str:
     return name
 
 
-def _get_skills_dir() -> Path:
-    """从全局配置拿 skills_dir，目录不存在则创建。"""
+def _get_skills_dirs() -> list[Path]:
+    """从全局配置拿 skills_dirs（多目录），目录不存在则创建。返回解析后的绝对路径列表。"""
     cfg = get_config()
-    skills_dir = cfg.agent.skills_dir
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    return skills_dir.resolve()
+    result: list[Path] = []
+    for d in cfg.agent.skills_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+        result.append(d.resolve())
+    return result
 
 
-def _skill_path(name: str) -> Path:
-    """返回某个 skill 的目标目录（已校验）。不保证存在。"""
-    skills_dir = _get_skills_dir()
-    return skills_dir / name
+def _locate_skill(name: str) -> tuple[Path, Path] | None:
+    """跨所有 skills 目录查找 skill。
+
+    返回 (skill 所在目录绝对路径, 所属 skills_dir 绝对路径)；找不到返回 None。
+    """
+    for skills_dir in _get_skills_dirs():
+        target = skills_dir / name
+        if target.exists():
+            return target.resolve(), skills_dir
+    return None
+
+
+def _resolve_target_dir(target_dir: str, dirs: list[Path]) -> Path:
+    """把前端传来的 target_dir 解析为已配置的 skills 目录之一（防穿越）。
+
+    匹配规则：先按字符串/绝对路径精确匹配，再按末段目录名匹配。
+    """
+    if not target_dir:
+        return dirs[0]
+    tgt = Path(target_dir)
+    tgt_resolved = tgt.resolve() if tgt.is_absolute() else None
+    # 精确匹配
+    for d in dirs:
+        if str(d) == target_dir or (tgt_resolved is not None and d == tgt_resolved):
+            return d
+    # 末段目录名匹配
+    for d in dirs:
+        if d.name == target_dir:
+            return d
+    raise SkillManageError(
+        f"目标目录不在已配置的 skills_dir 中: {target_dir}"
+        f"（已配置: {', '.join(str(d) for d in dirs)}）"
+    )
 
 
 def _run_git(args: list[str], cwd: Path, timeout: int = 60) -> tuple[int, str, str]:
@@ -152,14 +185,15 @@ class SkillDetail:
 # 核心操作
 # ============================================================
 
-def install_skill(url: str, name: str | None = None, force: bool = False) -> dict:
+def install_skill(url: str, name: str | None = None, force: bool = False, target_dir: str | None = None) -> dict:
     """
     从 git 仓库安装 skill。
 
     Args:
         url: git 仓库 URL（https 或 ssh）
-        name: 安装到 skills/<name>/；不传则从 URL 末段推断（去 .git 后缀）
+        name: 安装到 <skills_dir>/<name>/；不传则从 URL 末段推断（去 .git 后缀）
         force: 目标目录已存在时是否覆盖（先删再 clone）
+        target_dir: 指定安装到哪个 skills 目录（路径或目录名）；不传则装到第一个（主）目录
 
     Returns:
         {"name": ..., "dir": ..., "description": ..., "triggers": [...]}
@@ -180,7 +214,11 @@ def install_skill(url: str, name: str | None = None, force: bool = False) -> dic
         name = tail
     name = _validate_name(name)
 
-    target = _skill_path(name)
+    dirs = _get_skills_dirs()
+    if not dirs:
+        raise SkillManageError("未配置 skills_dir")
+    dest_base = _resolve_target_dir(target_dir, dirs) if target_dir else dirs[0]
+    target = dest_base / name
 
     # 目标已存在
     if target.exists():
@@ -208,7 +246,7 @@ def install_skill(url: str, name: str | None = None, force: bool = False) -> dic
         )
 
     # 读 frontmatter 给出反馈
-    registry = discover_skills(_get_skills_dir())
+    registry = discover_skills(_get_skills_dirs())
     # 目录名可能和 frontmatter 里的 name 不一致，按目录路径匹配
     target_resolved = target.resolve()
     info = None
@@ -240,10 +278,10 @@ def update_skill(name: str) -> dict:
         SkillManageError: 名字非法 / 目录不存在 / 不是 git 仓库 / git 操作失败
     """
     name = _validate_name(name)
-    target = _skill_path(name)
-
-    if not target.exists():
+    located = _locate_skill(name)
+    if located is None:
         raise SkillManageError(f"skill 不存在: {name}")
+    target, _skills_dir = located
 
     git_dir = target / ".git"
     if not git_dir.exists():
@@ -299,15 +337,14 @@ def delete_skill(name: str) -> dict:
         SkillManageError: 名字非法 / 目录不存在 / 目标不在 skills_dir 内（防穿越）
     """
     name = _validate_name(name)
-    target = _skill_path(name)
-
-    if not target.exists():
+    located = _locate_skill(name)
+    if located is None:
         raise SkillManageError(f"skill 不存在: {name}")
+    target, skills_dir = located
 
-    # 二次防穿越：解析后必须仍在 skills_dir 内
-    skills_dir = _get_skills_dir()
+    # 二次防穿越：解析后必须仍在所属 skills_dir 内（_locate_skill 已保证，这里兜底确认）
     try:
-        target.resolve().relative_to(skills_dir)
+        target.relative_to(skills_dir)
     except ValueError:
         raise SkillManageError(f"目标路径越界，拒绝删除: {target}")
 
@@ -324,8 +361,7 @@ def list_skills() -> list[dict]:
     Returns:
         [{name, description, triggers, dir_path, loaded, is_git_repo, ...}, ...]
     """
-    skills_dir = _get_skills_dir()
-    registry = discover_skills(skills_dir)
+    registry = discover_skills(_get_skills_dirs())
     result: list[dict] = []
     for name, info in sorted(registry.items()):
         detail = _build_detail(info)
@@ -341,8 +377,7 @@ def info_skill(name: str) -> dict:
         SkillManageError: 名字非法 / skill 不存在
     """
     name = _validate_name(name)
-    skills_dir = _get_skills_dir()
-    registry = discover_skills(skills_dir)
+    registry = discover_skills(_get_skills_dirs())
     info = registry.get(name)
     if info is None:
         raise SkillManageError(f"skill 不存在: {name}")
@@ -418,6 +453,7 @@ def _cli() -> int:
     p_install.add_argument("url", help="git 仓库 URL")
     p_install.add_argument("--name", default=None, help="安装目录名（默认从 URL 推断）")
     p_install.add_argument("--force", action="store_true", help="目录已存在时覆盖")
+    p_install.add_argument("--target-dir", default=None, help="装到哪个 skills 目录（路径或目录名，默认第一个）")
 
     p_update = sub.add_parser("update", help="更新已安装的 skill")
     p_update.add_argument("name", help="skill 名")
@@ -458,7 +494,7 @@ def _cli() -> int:
 
         elif args.cmd == "install":
             print(f"正在从 {args.url} 安装 skill...")
-            result = install_skill(args.url, name=args.name, force=args.force)
+            result = install_skill(args.url, name=args.name, force=args.force, target_dir=args.target_dir)
             print(f"[OK] 安装成功: {result['name']}")
             print(f"     目录: {result['dir']}")
             print(f"     描述: {result['description']}")

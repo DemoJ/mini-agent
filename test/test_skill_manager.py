@@ -447,7 +447,7 @@ def test_delete_not_found():
 def test_delete_path_traversal_blocked():
     tmpdir, skills_dir, cfg_path, env = _setup_isolated_env()
     try:
-        # _validate_name 已挡掉 ..，但即使绕过名字校验，_skill_path 也只拼到 skills_dir 下
+        # _validate_name 已挡掉 ..，但即使绕过名字校验，_locate_skill 也只在 skills_dirs 下查找
         # 这里验证名字校验层
         try:
             delete_skill("../escape")

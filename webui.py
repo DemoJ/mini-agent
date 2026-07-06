@@ -15,13 +15,14 @@ import threading
 from pathlib import Path
 from typing import Any, Iterator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from agent.agent_loop import Agent
 from agent.config_loader import get_config, load_config, save_config
+from agent.file_manager import get_file_manager, init_file_manager
 from agent.skill_manager import (
     SkillManageError,
     delete_skill,
@@ -38,6 +39,9 @@ from agent.skill_manager import (
 
 CONFIG_PATH = "config.yaml"
 WEB_DIR = Path(__file__).parent / "web"
+
+# 文件上传大小上限（50MB）
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024
 
 _agent: Agent | None = None
 
@@ -70,6 +74,26 @@ def _force_release_busy() -> None:
     global _busy
     with _busy_lock:
         _busy = False
+
+
+def _build_message_with_files(text: str, file_ids: list[str]) -> str:
+    """将上传文件信息追加到用户消息文本中，让 Agent 知道文件路径。"""
+    if not file_ids:
+        return text
+    try:
+        fm = get_file_manager()
+    except RuntimeError:
+        return text
+    file_lines = []
+    for fid in file_ids:
+        info = fm.get_file(fid)
+        if info:
+            file_lines.append(
+                f"- {info['filename']} (路径: {info['stored_path']}, 大小: {info['size']} 字节)"
+            )
+    if not file_lines:
+        return text
+    return text + "\n\n[用户上传的文件]\n" + "\n".join(file_lines)
 
 
 def get_agent() -> Agent:
@@ -109,6 +133,7 @@ def index():
 
 class ChatRequest(BaseModel):
     message: str
+    file_ids: list[str] = []  # 用户上传文件的 file_id 列表
 
 
 class ConfigRequest(BaseModel):
@@ -120,6 +145,7 @@ class SkillInstallRequest(BaseModel):
     url: str
     name: str | None = None
     force: bool = False
+    target_dir: str | None = None
 
 
 class SkillUpdateRequest(BaseModel):
@@ -159,7 +185,8 @@ def api_chat(req: ChatRequest):
             content={"reply": None, "steps": [], "error": "config.yaml 不存在，请先在设置页配置或复制 config.example.yaml 为 config.yaml"},
         )
     try:
-        result = agent.chat_with_steps(text)
+        full_text = _build_message_with_files(text, req.file_ids)
+        result = agent.chat_with_steps(full_text)
         return result
     except Exception as e:
         return {"reply": None, "steps": [], "error": f"内部错误: {e}"}
@@ -202,7 +229,8 @@ def api_chat_stream(req: ChatRequest):
 
     def event_stream() -> Iterator[str]:
         try:
-            for evt in agent.chat_stream(text):
+            full_text = _build_message_with_files(text, req.file_ids)
+            for evt in agent.chat_stream(full_text):
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
         except Exception as e:
             err = {"type": "done", "error": f"内部错误: {e}", "reply": None}
@@ -301,6 +329,60 @@ def api_save_config(req: ConfigRequest):
 
 
 # ============================================================
+# 文件上传 / 下载接口
+# ============================================================
+
+@app.post("/api/upload")
+async def api_upload(file: UploadFile = File(...)):
+    """接收用户上传的文件，保存到 uploads/ 目录，返回文件信息。"""
+    # 读取文件内容并检查大小
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_SIZE:
+        return JSONResponse(
+            status_code=413,
+            content={"error": f"文件大小超过限制（{MAX_UPLOAD_SIZE // 1024 // 1024}MB）"},
+        )
+    try:
+        fm = get_file_manager()
+    except RuntimeError:
+        # FileManager 尚未初始化（Agent 未创建），用项目目录初始化
+        fm = init_file_manager(Path(__file__).parent)
+    try:
+        info = fm.save_upload(content, file.filename or "upload")
+        return {
+            "ok": True,
+            "file_id": info["file_id"],
+            "filename": info["filename"],
+            "size": info["size"],
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"保存文件失败: {e}"},
+        )
+
+
+@app.get("/api/files/{file_id}")
+def api_download_file(file_id: str):
+    """按 file_id 下载文件。"""
+    try:
+        fm = get_file_manager()
+    except RuntimeError:
+        raise HTTPException(status_code=404, detail="文件服务未就绪")
+    info = fm.get_file(file_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail="文件不存在或已过期")
+    stored_path = Path(info["stored_path"])
+    if not stored_path.exists():
+        raise HTTPException(status_code=404, detail="文件已被删除")
+    return FileResponse(
+        str(stored_path),
+        filename=info["filename"],
+        media_type="application/octet-stream",
+    )
+
+
+# ============================================================
 # Skill 管理接口
 # ============================================================
 
@@ -318,6 +400,19 @@ def api_list_skills():
         return {"skills": list_skills()}
     except SkillManageError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/skills/dirs")
+def api_list_skill_dirs():
+    """返回已配置的 skills 目录列表（供前端安装时选择目标目录）。"""
+    try:
+        cfg = get_config()
+    except RuntimeError:
+        try:
+            cfg = load_config(CONFIG_PATH)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="config.yaml 不存在")
+    return {"dirs": [str(d) for d in cfg.agent.skills_dirs]}
 
 
 @app.get("/api/skills/{name}")
@@ -347,7 +442,7 @@ def api_install_skill(req: SkillInstallRequest):
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="config.yaml 不存在")
     try:
-        result = install_skill(req.url, name=req.name, force=req.force)
+        result = install_skill(req.url, name=req.name, force=req.force, target_dir=req.target_dir)
         # 安装后重建 Agent，刷新 skill 索引
         rebuild_agent()
         return {"ok": True, **result}

@@ -92,29 +92,42 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
 # L1：索引层 - 只读 frontmatter
 # ============================================================
 
-def discover_skills(skills_dir: str | Path) -> dict[str, SkillInfo]:
+def discover_skills(skills_dirs) -> dict[str, SkillInfo]:
     """
-    扫描 skills/ 目录下所有 */SKILL.md，只解析 frontmatter。
-    返回 {skill_name: SkillInfo}。目录不存在则返回空 dict。
-    """
-    skills_dir = Path(skills_dir)
-    registry: dict[str, SkillInfo] = {}
-    if not skills_dir.exists():
-        return registry
+    扫描 skills 目录下所有 */SKILL.md，只解析 frontmatter。
+    返回 {skill_name: SkillInfo}。目录不存在则跳过。
 
-    for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
-        try:
-            text = skill_md.read_text(encoding="utf-8")
-        except Exception:
+    Args:
+        skills_dirs: 单个目录（str/Path）或目录列表。支持多目录扫描；
+                     靠前的目录优先级更高，同名 skill 由先扫描到的目录提供。
+
+    返回的 SkillInfo.dir_path 指向该 skill 实际所在目录。
+    """
+    # 统一成列表
+    if isinstance(skills_dirs, (str, Path)):
+        skills_dirs = [skills_dirs]
+    registry: dict[str, SkillInfo] = {}
+
+    for skills_dir in skills_dirs:
+        skills_dir = Path(skills_dir)
+        if not skills_dir.exists():
             continue
-        meta, _ = _parse_frontmatter(text)
-        name = meta.get("name") or skill_md.parent.name
-        registry[name] = SkillInfo(
-            name=name,
-            description=meta.get("description", ""),
-            triggers=list(meta.get("triggers", []) or []),
-            dir_path=skill_md.parent,
-        )
+        for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
+            try:
+                text = skill_md.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            meta, _ = _parse_frontmatter(text)
+            name = meta.get("name") or skill_md.parent.name
+            # 同名 skill：靠前目录优先，后扫描到的跳过
+            if name in registry:
+                continue
+            registry[name] = SkillInfo(
+                name=name,
+                description=meta.get("description", ""),
+                triggers=list(meta.get("triggers", []) or []),
+                dir_path=skill_md.parent,
+            )
     return registry
 
 
