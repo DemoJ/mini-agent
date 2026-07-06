@@ -724,6 +724,7 @@ async function loadSettings() {
         $('cfg-temperature').value = cfg.agent?.temperature ?? '';
         $('cfg-max-tokens').value = cfg.agent?.max_tokens ?? '';
         $('cfg-reasoning-effort').value = cfg.agent?.reasoning_effort || 'none';
+        $('cfg-max-context-chars').value = cfg.agent?.max_context_chars ?? '';
         $('cfg-system-prompt').value = cfg.agent?.system_prompt || '';
         $('cfg-user-prompt').value = cfg.agent?.user_prompt || '';
         // skills_dir：后端返回列表，前端用多行文本展示（每行一个目录）
@@ -756,6 +757,7 @@ async function saveSettings(event) {
             max_steps: parseInt($('cfg-max-steps').value, 10) || 10,
             temperature: parseFloat($('cfg-temperature').value) || 0.7,
             max_tokens: parseInt($('cfg-max-tokens').value, 10) || 4096,
+            max_context_chars: (() => { const v = parseInt($('cfg-max-context-chars').value, 10); return isNaN(v) ? 0 : v; })(),
             reasoning_effort: $('cfg-reasoning-effort').value,
             system_prompt: $('cfg-system-prompt').value,
             user_prompt: $('cfg-user-prompt').value,

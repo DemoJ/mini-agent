@@ -548,6 +548,134 @@ class Agent:
                     answered_ids.add(tc_id)
 
     # --------------------------------------------------------
+    # 消息历史管理
+    # --------------------------------------------------------
+
+    def _strip_old_image_data(self) -> None:
+        """将历史消息中非最新轮次的图片 base64 数据替换为文本占位符。
+
+        多轮对话后，旧图片的 base64 数据占用大量请求体空间，
+        是导致 API 400 'unexpected end of data' 错误的主要原因。
+        只保留最后一条带图片的用户消息中的图片数据，
+        之前的图片消息降级为纯文本描述（图片已不可再被模型查看）。
+        """
+        # 找到最后一条带图片的 user 消息索引
+        last_image_msg_idx = -1
+        for i, msg in enumerate(self.messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            if any(
+                isinstance(p, dict) and p.get("type") == "image_url"
+                for p in content
+            ):
+                last_image_msg_idx = i
+
+        if last_image_msg_idx < 0:
+            return  # 没有图片消息
+
+        # 将最后一条图片消息之前的图片消息降级
+        for i, msg in enumerate(self.messages):
+            if i >= last_image_msg_idx:
+                break
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            new_parts: list[dict] = []
+            has_image = False
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "image_url":
+                    has_image = True
+                    new_parts.append({
+                        "type": "text",
+                        "text": "[此图片内容已在历史消息中省略以节省上下文空间]",
+                    })
+                else:
+                    new_parts.append(part)
+            if not has_image:
+                continue
+            # 降级后如果只剩 text 部分，直接转为字符串（减少 JSON 开销）
+            if all(p.get("type") == "text" for p in new_parts):
+                text_parts = [p.get("text", "") for p in new_parts]
+                msg["content"] = "\n".join(text_parts)
+            else:
+                msg["content"] = new_parts
+
+    def _estimate_messages_size(self) -> int:
+        """估算消息历史的 JSON 序列化大小（字符数）。"""
+        try:
+            return len(json.dumps(self.messages, ensure_ascii=False))
+        except (TypeError, ValueError):
+            # 降级：累加各消息内容长度
+            total = 0
+            for msg in self.messages:
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    total += len(content)
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            total += len(str(part))
+                tool_calls = msg.get("tool_calls")
+                if tool_calls:
+                    total += len(str(tool_calls))
+            return total
+
+    def _trim_messages(self) -> None:
+        """截断过长的消息历史，保持 tool_calls + tool result 配对完整性。
+
+        当消息历史大小超过 max_context_chars 时，从最早的完整对话轮次开始移除。
+        确保不在 assistant(tool_calls) 和其 tool results 之间截断。
+        保留至少最后 2 条消息（当前轮次的 user 消息 + 可能的 assistant 回复）。
+        """
+        max_chars = self._cfg.agent.max_context_chars
+        if max_chars <= 0:
+            return  # 不限制
+
+        min_keep = 2  # 至少保留 2 条消息
+
+        while (
+            self._estimate_messages_size() > max_chars
+            and len(self.messages) > min_keep
+        ):
+            if not self.messages:
+                break
+
+            first = self.messages[0]
+            role = first.get("role", "")
+
+            if role == "assistant" and first.get("tool_calls"):
+                # assistant(tool_calls) → 连同后续所有 tool results 一起移除
+                self.messages.pop(0)
+                while (
+                    self.messages
+                    and self.messages[0].get("role") == "tool"
+                    and len(self.messages) > min_keep
+                ):
+                    self.messages.pop(0)
+            else:
+                # user / assistant(text) / 孤立 tool result → 安全移除
+                self.messages.pop(0)
+
+            if len(self.messages) <= min_keep:
+                break
+
+    def _manage_message_history(self) -> None:
+        """在每次 LLM 调用前管理消息历史：图片降级 + 大小截断。
+
+        这是防止多轮对话后 API 报 'unexpected end of data' 错误的核心方法。
+        顺序：先降级旧图片（减少体积），再检查大小截断（兜底）。
+        """
+        self._strip_old_image_data()
+        self._trim_messages()
+
+    # --------------------------------------------------------
     # LLM 调用
     # --------------------------------------------------------
 
@@ -709,6 +837,9 @@ class Agent:
 
     def _call_llm(self) -> tuple[Any, str | None]:
         """调用 LLM，返回 (response, error)。"""
+        # 在发送前管理消息历史：降级旧图片 + 截断过长历史
+        self._manage_message_history()
+
         messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": self.system_prompt},
             *self.messages,
@@ -735,6 +866,9 @@ class Agent:
 
     def _call_llm_stream(self):
         """流式调用 LLM，返回 chunk 迭代器。"""
+        # 在发送前管理消息历史：降级旧图片 + 截断过长历史
+        self._manage_message_history()
+
         messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": self.system_prompt},
             *self.messages,

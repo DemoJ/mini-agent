@@ -56,6 +56,10 @@ class AgentConfig:
         self.max_steps: int = cfg.get("max_steps", 10)
         self.temperature: float = cfg.get("temperature", 0.7)
         self.max_tokens: int = cfg.get("max_tokens", 4096)
+        # 消息历史最大字符数（JSON 序列化后）。超过时自动截断旧消息，
+        # 防止多轮对话后请求体过大导致 API 报错（如 'unexpected end of data'）。
+        # 0 = 不限制。默认 100000（约 100KB），兼顾多数 API 服务端的请求体限制。
+        self.max_context_chars: int = cfg.get("max_context_chars", 100000)
         # 思考模式：none/null → 关闭，minimal/low/medium/high/xhigh → 对应级别
         _raw = cfg.get("reasoning_effort", None)
         self.reasoning_effort: str | None = (
@@ -131,6 +135,7 @@ class AgentConfig:
             "max_steps": self.max_steps,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "max_context_chars": self.max_context_chars,
             "reasoning_effort": self.reasoning_effort or "none",
             "system_prompt": self.system_prompt,
             "user_prompt": self.user_prompt,
