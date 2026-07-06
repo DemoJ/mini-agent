@@ -72,23 +72,19 @@ RUN mkdir -p /etc/pip \
     && echo "extra-index-url = https://mirrors.aliyun.com/pypi/simple/ https://mirrors.tencent.com/pypi/simple/" >> /etc/pip.conf \
     && echo "trusted-host = pypi.tuna.tsinghua.edu.cn mirrors.aliyun.com mirrors.tencent.com" >> /etc/pip.conf
 
-# -------------------- 构建时安装项目 Python 依赖（显式指定国内源）---------------
-RUN pip install --no-cache-dir \
-        -i https://pypi.tuna.tsinghua.edu.cn/simple \
-        --extra-index-url https://mirrors.aliyun.com/pypi/simple/ \
-        --trusted-host pypi.tuna.tsinghua.edu.cn \
-        --trusted-host mirrors.aliyun.com \
-        "openai>=1.0.0" \
-        "pyyaml>=6.0" \
-        "fastapi>=0.110.0" \
-        "uvicorn[standard]>=0.27.0"
-
-# 拷贝项目源码（config.yaml 由 .dockerignore 排除）
+# -------------------- 拷贝项目源码（config.yaml 由 .dockerignore 排除）---------------
+# 提前拷贝项目文件，以便 pip install . 可以读取 pyproject.toml 安装依赖
+COPY pyproject.toml ./
 COPY main.py webui.py ./
 COPY agent/  ./agent/
 COPY web/    ./web/
 COPY prompt/ ./prompt/
 COPY config.example.yaml ./
+
+# -------------------- 构建时安装项目 Python 依赖 --------------------
+# 直接使用 pip install . 读取 pyproject.toml，自动安装全部声明依赖
+# 已通过 /etc/pip.conf 全局配置国内镜像源，无需重复指定 -i 参数
+RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
