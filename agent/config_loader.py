@@ -4,6 +4,7 @@
 从 config.yaml 读取配置，提供类型安全的配置对象。
 """
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -78,9 +79,16 @@ class AgentConfig:
             raw_list = [str(skills_dir_raw)] if str(skills_dir_raw).strip() else []
         if not raw_list:
             raw_list = ["skills"]
-        self.skills_dirs: list[Path] = [
-            Path(p) if Path(p).is_absolute() else (base_dir / p) for p in raw_list
-        ]
+        # 展开 ~ 为用户主目录，使路径配置跨平台兼容
+        # （如 ~/.agents/skills 在 Windows 上展开为 C:\Users\xxx\.agents\skills，
+        #   在 Linux 上展开为 /root/.agents/skills 或 /home/xxx/.agents/skills）
+        self.skills_dirs: list[Path] = []
+        for p in raw_list:
+            expanded = os.path.expanduser(p)
+            path = Path(expanded)
+            if not path.is_absolute():
+                path = base_dir / expanded
+            self.skills_dirs.append(path)
 
     @staticmethod
     def _resolve_prompt(cfg: dict[str, Any], key: str, base_dir: Path) -> tuple[str, Path | None]:
@@ -99,7 +107,18 @@ class AgentConfig:
         return (str(val) if val else ""), None
 
     def _file_rel(self, fpath: Path) -> str:
-        """把文件路径转为相对 base_dir 的字符串（与 config.yaml 中写法一致）。"""
+        """把路径转为配置文件中的字符串表示（与 config.yaml 中写法一致）。
+
+        用户主目录下的路径用 ~ 缩写（跨平台兼容），其余尝试相对 base_dir。
+        """
+        # 先尝试 ~ 缩写（用户主目录下的路径）
+        home = Path.home()
+        try:
+            rel = fpath.relative_to(home)
+            return "~/" + "/".join(rel.parts)
+        except ValueError:
+            pass
+        # 再尝试相对 base_dir
         try:
             return str(fpath.relative_to(self._base_dir.resolve()))
         except ValueError:

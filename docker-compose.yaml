@@ -10,7 +10,6 @@ services:
       - "8080:8000"
     volumes:
       - ./config.yaml:/app/config.yaml:rw
-      # - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
       # ---------- 代理配置 ----------
