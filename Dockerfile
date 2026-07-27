@@ -77,6 +77,7 @@ RUN mkdir -p /etc/pip \
 COPY pyproject.toml ./
 COPY main.py webui.py ./
 COPY agent/  ./agent/
+COPY server/ ./server/
 COPY web/    ./web/
 COPY prompt/ ./prompt/
 COPY config.example.yaml ./

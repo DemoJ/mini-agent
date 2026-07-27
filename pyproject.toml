@@ -12,6 +12,6 @@ dependencies = [
 ]
 
 [tool.setuptools]
-# agent/ 为核心包（含子包 agent/tools/）；main.py / webui.py 为顶层入口脚本
-packages = ["agent", "agent.tools"]
+# agent/ 为核心包；server/ 为 WebUI 服务端；main.py / webui.py 为顶层入口
+packages = ["agent", "agent.tools", "server", "server.routes"]
 py-modules = ["main", "webui"]

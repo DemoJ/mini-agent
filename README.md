@@ -2,6 +2,9 @@
 
 一个最小的 Agent Loop 实现，使用 OpenAI SDK 调用兼容 API（OpenAI、Azure、ollama、vLLM 等）。
 
+- 仓库：<https://github.com/DemoJ/mini-agent>
+- 要求：Python ≥ 3.10
+
 ## 设计
 
 这是一个**自主 Agent** —— 每一轮用户消息，Agent 自主决定：
@@ -14,13 +17,26 @@
 
 ## 快速开始
 
-### 1. 配置
+适合本地临时试用。长期后台运行请看 [本机部署（开机自启）](#本机部署开机自启)。
+
+### 1. 获取代码
 
 ```bash
-cp config.yaml.example config.yaml
+git clone https://github.com/DemoJ/mini-agent.git
+cd mini-agent
 ```
 
-编辑 `config.yaml`，至少填写 `api_key`：
+### 2. 配置
+
+```bash
+# Linux / macOS
+cp config.example.yaml config.yaml
+
+# Windows PowerShell
+Copy-Item config.example.yaml config.yaml
+```
+
+编辑 `config.yaml`，至少填写 `api_key`（也可先启动 WebUI，在设置页填写）：
 
 ```yaml
 api:
@@ -29,9 +45,19 @@ api:
   model: "gpt-4o"
 ```
 
-### 2. 安装依赖
+### 3. 安装依赖
+
+推荐使用虚拟环境：
 
 ```bash
+# Linux / macOS
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+# Windows PowerShell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -e .
 ```
 
@@ -47,8 +73,7 @@ pip install -e .
 > - 腾讯：`https://mirrors.cloud.tencent.com/pypi/simple`
 > - 中科大：`https://pypi.mirrors.ustc.edu.cn/simple/`
 
-
-### 3. 运行
+### 4. 运行
 
 提供两种交互方式：
 
@@ -65,6 +90,7 @@ python main.py
 ```bash
 python webui.py                 # 默认 127.0.0.1:8000
 python webui.py --port 8080     # 自定义端口
+python webui.py --host 0.0.0.0 --port 8000   # 局域网可访问
 ```
 
 浏览器打开 `http://127.0.0.1:8000`：
@@ -74,35 +100,109 @@ python webui.py --port 8080     # 自定义端口
 
 > WebUI 为单 Agent 串行处理，同一时刻只处理一条消息。对话历史仅保留在内存中，刷新页面会清空。
 
+---
+
+## 本机部署（一键 + 开机自启）
+
+脚本会自动完成：创建 `.venv` → 安装依赖 → 生成 `config.yaml` → 注册自启 → 立即启动。  
+默认监听 **`0.0.0.0:8000`**（本机与局域网均可访问）。前提：已安装 **Python ≥ 3.10**。
+
+```bash
+git clone https://github.com/DemoJ/mini-agent.git
+cd mini-agent
+```
+
+### Windows
+
+```powershell
+# 若无法运行脚本，先执行一次：
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+
+# 一键部署 + 登录自启（推荐，无需管理员）
+.\deploy\windows\install-autostart.ps1 -AtLogon
+
+# 一键部署 + 开机自启（需管理员 PowerShell）
+.\deploy\windows\install-autostart.ps1
+
+# 自定义端口
+.\deploy\windows\install-autostart.ps1 -AtLogon -Port 8080
+```
+
+部署后访问 `http://<本机IP>:8000` 或 <http://127.0.0.1:8000>，在「设置」填入 API Key。
+
+```powershell
+# 状态 / 启停 / 卸载
+Get-ScheduledTask -TaskName mini-agent-webui | Get-ScheduledTaskInfo
+Start-ScheduledTask -TaskName mini-agent-webui
+Stop-ScheduledTask -TaskName mini-agent-webui
+.\deploy\windows\uninstall-autostart.ps1
+```
+
+### Linux
+
+```bash
+chmod +x deploy/linux/*.sh
+./deploy/linux/install-autostart.sh                 # 一键部署 + 开机自启
+./deploy/linux/install-autostart.sh --port 8080     # 自定义端口
+```
+
+部署后访问 `http://<本机IP>:8000` 或 <http://127.0.0.1:8000>，在「设置」填入 API Key。
+
+```bash
+systemctl status mini-agent
+journalctl -u mini-agent -f
+systemctl restart mini-agent
+./deploy/linux/uninstall-autostart.sh
+```
+
+### Docker（可选）
+
+```bash
+git clone https://github.com/DemoJ/mini-agent.git && cd mini-agent
+cp config.example.yaml config.yaml   # 编辑填入 api_key
+docker compose up -d --build         # 宿主机 http://127.0.0.1:8080
+```
+
+> `docker-compose.yaml` 里的代理环境变量请按本机网络修改或删除。
+
 ## 项目结构
 
 ```
 mini-agent/
 ├── main.py                 # REPL 入口
-├── webui.py                # WebUI 入口（FastAPI）
+├── webui.py                # WebUI 入口（仅启动 uvicorn）
 ├── config.yaml             # 本地配置（已 gitignore）
 ├── config.example.yaml     # 示例配置
 ├── pyproject.toml          # 项目元数据与打包配置
+├── deploy/                 # 本机部署与开机自启
+│   ├── windows/            # 计划任务安装/卸载、前台启动
+│   └── linux/              # systemd 单元与安装/卸载脚本
 ├── agent/                  # 核心包
 │   ├── __init__.py         # 包入口，导出 Agent / Config 等
 │   ├── agent_loop.py       # Agent 自主循环 + 工具执行分发
 │   ├── config_loader.py    # 配置加载/保存模块
 │   ├── skill_loader.py     # Skill 三层懒加载（索引/指令/参考）
 │   ├── skill_manager.py    # Skill 管理（安装/更新/删除/列表/详情）
+│   ├── file_manager.py     # 上传文件管理
 │   └── tools/              # 工具注册
-│       ├── __init__.py     # 导出 get_builtin_tools / get_skill_tool_defs
+│       ├── __init__.py
 │       ├── builtin.py      # 内置工具：bash / finish
-│       └── skill_tools.py  # skill 工具 schema：load_skill / list / install / update / delete / info
+│       └── skill_tools.py  # skill 工具 schema
+├── server/                 # WebUI 服务端（FastAPI）
+│   ├── app.py              # 应用工厂
+│   ├── state.py            # Agent 单例与 busy 槽
+│   ├── schemas.py          # 请求模型
+│   ├── message_builder.py  # 多模态消息构建
+│   └── routes/             # chat / config / files / skills / pages
 ├── test/                   # 单元测试
-│   └── test_skill_manager.py
 ├── web/                    # WebUI 前端
-│   ├── index.html          # 单页前端
-│   ├── app.js              # 交互逻辑
-│   └── style.css           # 样式
+│   ├── index.html
+│   ├── app.js
+│   └── style.css
 ├── prompt/
-│   ├── system.md           # 系统提示词
-│   └── user.md             # 用户提示词模板
-└── skills/                 # 已安装 skill 目录（每个子目录是一个 skill）
+│   ├── system.md
+│   └── user.md
+└── skills/                 # 已安装 skill 目录
 ```
 
 ## 扩展

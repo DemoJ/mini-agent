@@ -1,0 +1,24 @@
+[Unit]
+Description=mini-agent WebUI
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 安装脚本会替换下面三个占位符
+User=__USER__
+WorkingDirectory=__PROJECT_ROOT__
+ExecStart=__PYTHON__ __PROJECT_ROOT__/webui.py --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+# 崩溃后无限重启，避免偶发依赖/网络问题直接退出
+StartLimitIntervalSec=0
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Asia/Shanghai
+
+# 安全加固（按需放宽）
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
