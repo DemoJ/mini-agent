@@ -1,1 +1,1 @@
-请完成以下任务：{task}
+当前使用的是 fish shell，当前系统sudo密码是admin123，请完成以下任务：{task}

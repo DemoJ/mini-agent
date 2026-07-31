@@ -653,9 +653,11 @@ function toggleStep(headerEl) {
 
 async function resetChat() {
     if (!confirm('确定清空当前对话？')) return;
+    stopRestorePolling();
     try {
         await fetch('/api/reset', { method: 'POST' });
         messagesEl().innerHTML = renderWelcome();
+        restoreEventCount = 0;
     } catch (e) {
         showError('清空失败: ' + e.message);
     }
@@ -903,6 +905,120 @@ function updateSendBtn() {
 }
 
 // ------------------------------------------------------------
+// 会话恢复（页面刷新/重开后恢复最近一次会话）
+// ------------------------------------------------------------
+let restorePollTimer = null;
+let restoreEventCount = 0;       // 已恢复（已渲染）的事件数
+
+async function restoreSession() {
+    try {
+        const resp = await fetch('/api/session');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const events = data.events || [];
+        if (events.length === 0) return;  // 无最近会话，显示欢迎屏
+
+        // 移除欢迎屏
+        const welcome = messagesEl().querySelector('.welcome');
+        if (welcome) welcome.remove();
+
+        // 回放已产出的事件
+        replayEvents(events);
+
+        // 如果任务仍在进行中，启动轮询续接后续事件
+        if (data.busy && !data.done) {
+            sending = true;
+            setSending(true);
+            setStatus('恢复中…', true);
+            startRestorePolling();
+        }
+    } catch (e) {
+        // 恢复失败不影响正常使用
+    }
+}
+
+function replayEvents(events) {
+    const ctx = {
+        reasoningEl: null,
+        reasoningBody: null,
+        reasoningHasContent: false,
+        replyRow: null,
+        replyBubble: null,
+        replyRaw: '',
+        replyHasContent: false,
+    };
+    for (const evt of events) {
+        if (evt.type === 'user_message') {
+            // 用户消息：定稿当前块后追加
+            finalizeReasoning(ctx);
+            finalizeReply(ctx);
+            appendUserMessage(evt.content || '', evt.files || []);
+        } else {
+            handleStreamEvent(evt, ctx);
+        }
+    }
+    // 回放结束后定稿所有块
+    finalizeReasoning(ctx);
+    finalizeReply(ctx);
+    restoreEventCount = events.length;
+    scrollToBottom();
+}
+
+function startRestorePolling() {
+    if (restorePollTimer) return;
+    restorePollTimer = setInterval(async () => {
+        try {
+            const resp = await fetch('/api/session');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const events = data.events || [];
+            if (events.length > restoreEventCount) {
+                // 只处理新增的事件
+                const ctx = {
+                    reasoningEl: null,
+                    reasoningBody: null,
+                    reasoningHasContent: false,
+                    replyRow: null,
+                    replyBubble: null,
+                    replyRaw: '',
+                    replyHasContent: false,
+                };
+                // 注意：增量事件需要接续渲染，但 ctx 是全新的。
+                // 对于 reply_delta，需要先恢复已有回复内容到 replyRaw。
+                // 简化处理：完整重渲整个会话（事件量不大，性能可接受）
+                messagesEl().innerHTML = '';
+                replayEvents(events);
+                // 轮询模式下不需要 finalize（replayEvents 内部已做）
+            }
+            // 任务完成 -> 停止轮询
+            if (data.done || !data.busy) {
+                stopRestorePolling();
+                // 重新拉一次确保最终状态完整
+                const finalResp = await fetch('/api/session');
+                if (finalResp.ok) {
+                    const finalData = await finalResp.json();
+                    const finalEvents = finalData.events || [];
+                    if (finalEvents.length > restoreEventCount) {
+                        messagesEl().innerHTML = '';
+                        replayEvents(finalEvents);
+                    }
+                }
+                setStatus('', false);
+                sending = false;
+                setSending(false);
+            }
+        } catch (e) { /* 忽略轮询错误 */ }
+    }, 1500);
+}
+
+function stopRestorePolling() {
+    if (restorePollTimer) {
+        clearInterval(restorePollTimer);
+        restorePollTimer = null;
+    }
+}
+
+// ------------------------------------------------------------
 // 事件绑定
 // ------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', () => {
@@ -915,4 +1031,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     input.focus();
+    // 页面加载后尝试恢复最近会话
+    restoreSession();
 });

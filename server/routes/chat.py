@@ -9,13 +9,22 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from server.message_builder import build_message_with_files
 from server.schemas import ChatRequest
+from server.session_store import (
+    append_event,
+    clear_session,
+    get_session,
+    mark_done,
+    start_new_session,
+)
 from server.state import (
     force_release_busy,
     get_agent,
     get_agent_or_none,
+    is_busy,
     release_busy,
     try_acquire_busy,
 )
+from agent.file_manager import get_file_manager, is_image_file
 
 router = APIRouter()
 
@@ -96,12 +105,33 @@ def api_chat_stream(req: ChatRequest):
     def event_stream() -> Iterator[str]:
         try:
             full_text = build_message_with_files(text, req.file_ids)
+            start_new_session()
+            # 用户消息也记入会话，供前端恢复时显示（含文件元数据）
+            user_evt = {"type": "user_message", "content": text, "files": []}
+            if req.file_ids:
+                try:
+                    fm = get_file_manager()
+                    for fid in req.file_ids:
+                        info = fm.get_file(fid)
+                        if info:
+                            user_evt["files"].append({
+                                "name": info["filename"],
+                                "size": info["size"],
+                                "file_id": fid,
+                                "is_image": is_image_file(info["filename"]),
+                            })
+                except RuntimeError:
+                    pass
+            append_event(user_evt)
             for evt in agent.chat_stream(full_text):
+                append_event(evt)
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
         except Exception as e:
             err = {"type": "done", "error": f"内部错误: {e}", "reply": None}
+            append_event(err)
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
         finally:
+            mark_done()
             release_busy()
 
     return StreamingResponse(
@@ -126,6 +156,7 @@ def api_reset():
     try:
         agent = get_agent()
         agent.reset()
+        clear_session()
     except FileNotFoundError:
         raise HTTPException(status_code=400, detail="config.yaml 不存在")
     finally:
@@ -149,4 +180,25 @@ def api_stop_chat():
     if agent is not None:
         agent.request_stop()
     threading.Timer(2.0, force_release_busy).start()
+    return {"ok": True}
+
+
+@router.get("/api/session")
+def api_get_session():
+    """
+    获取最近一次会话的事件流，用于页面刷新/重开后恢复显示。
+
+    返回 { events: [...], done: bool, busy: bool }。
+    - events: 已产出的事件列表（含 user_message / reasoning_delta / reply_delta / tool_call / tool_result / file / done）。
+    - done: 本次会话是否已结束。
+    - busy: 后端是否有任务正在执行（进行中时前端轮询续接）。
+    """
+    data = get_session()
+    return {"events": data["events"], "done": data["done"], "busy": is_busy()}
+
+
+@router.delete("/api/session")
+def api_clear_session():
+    """删除最近会话记录（仅清持久化，不影响内存中的对话历史）。"""
+    clear_session()
     return {"ok": True}

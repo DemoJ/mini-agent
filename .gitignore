@@ -35,3 +35,6 @@ skills/
 # 文件上传/输出目录
 uploads/
 outputs/
+
+# 会话记录（最近一次会话恢复用）
+.session.json
